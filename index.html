@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#e85d04">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="description" content="Offline installation progress, daily review and supervisor sign-off.">
+  <title>Installation Progress · Production Control</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="./icon-192.png">
+  <link rel="stylesheet" href="./app.css">
+  <script defer src="./vendor/pako.min.js"></script>
+  <script defer src="./vendor/jszip.min.js"></script>
+  <script defer src="./shared/gate-config.js"></script>
+  <script defer src="./shared/production-core.js"></script>
+  <script defer src="./shared/weekly-core.js"></script>
+  <script defer src="./shared/files.js"></script>
+  <script defer src="./storage.js"></script>
+  <script defer src="./app.js"></script>
+</head>
+<body>
+  <svg class="symbol-bank" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="i-home" viewBox="0 0 24 24"><path d="m3 10 9-7 9 7v10H3zM9 20v-8h6v8"/></symbol>
+    <symbol id="i-room" viewBox="0 0 24 24"><path d="M3 21h18M6 21V4l11-2v19M17 5h3v16M13 12v1"/></symbol>
+    <symbol id="i-draft" viewBox="0 0 24 24"><path d="M8 4H5v17h14V4h-3M8 2h8v5H8zM8 11h8M8 15h8"/></symbol>
+    <symbol id="i-export" viewBox="0 0 24 24"><path d="M13 3H4v18h16v-8M11 12 21 2M15 2h6v6"/></symbol>
+    <symbol id="i-camera" viewBox="0 0 24 24"><path d="M3 7h4l2-3h6l2 3h4v14H3z"/><circle cx="12" cy="13" r="4"/></symbol>
+    <symbol id="i-photo" viewBox="0 0 24 24"><path d="M3 3h18v18H3zM3 17l6-6 4 4 3-3 5 5"/><circle cx="16" cy="7" r="1"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 3v13m-5-5 5 5 5-5M3 17v4h18v-4"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m4 12 5 5L20 6"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 4v16M4 12h16"/></symbol>
+    <symbol id="i-offline" viewBox="0 0 24 24"><path d="m3 3 18 18M5 8a5 5 0 0 0 0 10h12M9 5a7 7 0 0 1 10 6 4 4 0 0 1 2 6"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+  </svg>
+  <div id="app">
+    <header class="app-header">
+      <div class="header-top"><div><div class="brand">Installation Progress</div><div class="subtitle">Production Control</div></div><button class="icon-button header-menu" id="settings-button" aria-label="Week and field settings"><svg><use href="#i-menu"/></svg></button></div>
+      <div class="header-status"><span id="offline-status" role="status">Preparing offline copy…</span><span id="week-label"></span></div>
+    </header>
+    <div id="error-banner" role="alert" hidden></div>
+    <main id="content" tabindex="-1"><p>Opening saved work…</p></main>
+    <div id="notice" role="status" aria-live="polite" hidden></div>
+    <nav id="bottom-menu" aria-label="Main menu" hidden>
+      <button data-page="home"><svg><use href="#i-home"/></svg><span>Home</span></button>
+      <button data-page="rooms"><svg><use href="#i-room"/></svg><span>Rooms</span></button>
+      <button data-page="draft"><svg><use href="#i-draft"/></svg><span>Draft</span></button>
+      <button data-page="export"><svg><use href="#i-export"/></svg><span>Export</span></button>
+      <button data-page="photos"><svg><use href="#i-photo"/></svg><span>Photos</span></button>
+    </nav>
+    <footer class="device-status"><button id="recovery-corner" aria-label="Recovery corner: tap five times">·</button><span id="save-status" class="screen-reader" role="status">Local storage</span><span id="day-label" class="screen-reader"></span></footer>
+  </div>
+  <input id="package-input" type="file" accept=".zip,application/zip" hidden>
+  <input id="recovery-input" type="file" accept=".zip,application/zip" hidden>
+  <input id="camera-input" type="file" accept="image/*" capture="environment" hidden>
+  <dialog id="modal"><div id="modal-body"></div></dialog>
+  <noscript>This application needs JavaScript to save offline work.</noscript>
+</body>
+</html>

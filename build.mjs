@@ -1,0 +1,21 @@
+import {readFile,writeFile,mkdir} from 'node:fs/promises';
+import {dirname,resolve} from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {createRequire} from 'node:module';
+import {createHash} from 'node:crypto';
+import {execFileSync} from 'node:child_process';
+const require=createRequire(import.meta.url),root=dirname(fileURLToPath(import.meta.url));
+globalThis.pako=require('./vendor/pako.min.js');globalThis.JSZip=require('./vendor/jszip.min.js');
+const W=require('./shared/weekly-core.js'),F=require('./shared/files.js');
+const declaration=JSON.parse(await readFile(resolve(root,'public-files.json'),'utf8'));
+const tracked=execFileSync('git',['ls-files','-z'],{cwd:root,encoding:'utf8'}).split('\0').filter(Boolean);
+const allowed=new Set(declaration.source);
+if(tracked.some(file=>!allowed.has(file)))throw Error('Publication includes files outside the application declaration.');
+const files=[...declaration.runtime,'README.md','preview-server.mjs'];
+const entries=[],hashes={version:W.VERSION,files:{}};
+for(const file of files){const raw=new Uint8Array(await readFile(resolve(root,file)));entries.push({name:'Installation-Progress/'+file,data:raw,compress:true});hashes.files[file]=createHash('sha256').update(raw).digest('hex');}
+await mkdir(resolve(root,'artifacts'),{recursive:true});
+const archive=await F.zip(entries);
+await writeFile(resolve(root,'artifacts/Installation-Progress-v'+W.VERSION+'.zip'),new Uint8Array(await archive.arrayBuffer()));
+await writeFile(resolve(root,'artifacts/build-manifest.json'),JSON.stringify(hashes,null,2));
+console.log(JSON.stringify({version:W.VERSION,applicationBytes:archive.size,files:entries.length}));
