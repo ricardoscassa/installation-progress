@@ -164,7 +164,7 @@
     content.append(button('Choose compressed file',()=>{$('package-input').click();},'button primary block','down'));
     content.append(button('Explore with example data',async()=>{stagedModel=W.example();renderLoad();},'button block'));
     if(stagedModel){
-      const suggested=stagedModel.recorder || session?.operator || {},name=input('text',suggested.name || '','Full name'),email=input('email',suggested.email || '','Optional email'),recordingAs=h('p','note');
+      const suggested=stagedModel.recorder || session?.operator || {},name=input('text',suggested.name || '','First name and surname'),email=input('email',suggested.email || '','Optional email'),recordingAs=h('p','note');
       content.append(h('h2','',stagedModel.reportingWeek),h('p','subtle',stagedModel.stats.planned+' planned ECS · '+Object.keys(stagedModel.roomCodes).length+' rooms · '+stagedModel.stats.candidates+' hidden search candidates'));
       content.append(field('Person recording this week',name),field('Email',email));
       const identity=()=>{recordingAs.textContent='Recording as: '+(name.value.trim() || 'enter your name')+(email.value.trim()?' · '+email.value.trim():'');};name.oninput=identity;email.oninput=identity;identity();content.append(recordingAs,h('p','subtle','Confirm these details. They identify the person recording each entry; supervisor names are recorded separately.'));

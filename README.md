@@ -16,6 +16,8 @@ Open the app online once and wait for **Offline ready**. Import a prepared weekl
 - Delete a daily entry from its editor or draft. Undo is available in the collapsed Deleted entries section for the loaded week, including its saved photos. Weekly-plan cards remain available. Restored work requires fresh review.
 - Export the daily package, including its complete recovery backup and saved photo bytes. Previous downloads remain available for the active week.
 
+New daily batches use `DL-YYYYMMDD-HHmmss-xxxxxxxx`, with UK local date and time and an eight-character random suffix. Repeat downloads retain the original batch ID. Older saved batches keep their existing IDs.
+
 The app records exports; it does not confirm that exported files were received elsewhere.
 
 Export history keeps each original package unchanged. Use Edit current entry to revise local work and prepare a new reviewed batch. Deleting an entry locally does not cancel a previous download or an upload; corrections to uploaded data are handled manually in its destination.

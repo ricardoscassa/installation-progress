@@ -3,7 +3,7 @@
   'use strict';
   const R = typeof module === 'object' && module.exports ? require('./production-core.js') : root.ProductionCore;
   const copy = R.copy, text = R.text;
-  const VERSION = '1.3.3';
+  const VERSION = '1.3.4';
   // Reporting ownership is separate from the ECS gate/field workflow.
   // Add a group here when another team joins; gate definitions remain unchanged.
   const WORK_GROUPS = [
@@ -173,8 +173,19 @@
     for(const char of key){a=Math.imul(a^char.charCodeAt(0),16777619);b=Math.imul(b^char.charCodeAt(0),3266489917);}
     return 'DL-NP-'+date(day).replace(/-/g,'')+'-'+[a,b].map(value=>(value>>>0).toString(16).padStart(8,'0')).join('');
   }
+  function newBatchId(now=new Date().toISOString()){
+    const parts=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/London',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(new Date(now));
+    const value=name=>parts.find(part=>part.type === name).value;
+    const random=root.crypto?.getRandomValues?root.crypto.getRandomValues(new Uint32Array(1))[0]:Math.floor(Math.random()*0x100000000);
+    return 'DL-'+value('year')+value('month')+value('day')+'-'+value('hour')+value('minute')+value('second')+'-'+random.toString(16).padStart(8,'0');
+  }
+  function freshBatchId(session,now){
+    const used=new Set([...Object.values(session.batches || {}),...(session.records || []).map(record=>record.batchId),...(session.checkins || []).map(record=>record.batchId)]);
+    for(let attempt=0;attempt<8;attempt++){const id=newBatchId(now);if(!used.has(id))return id;}
+    throw new Error('A unique daily batch could not be created. Try saving again.');
+  }
   function validateCheckin(record){
-    assert(isCheckin(record) && text(record.id) && /^DL-NP-[0-9]{8}-[0-9a-f]{16}$/.test(record.batchId || ''),'Invalid building check-in identity.');
+    assert(isCheckin(record) && text(record.id) && /^(?:DL-NP-[0-9]{8}-[0-9a-f]{16}|DL-[0-9]{8}-[0-9]{6}-[0-9a-f]{8})$/.test(record.batchId || ''),'Invalid building check-in identity.');
     assert(record.itemId === undefined && record.fields === undefined && record.photos === undefined,'A building check-in must not contain ECS progress or photo associations.');
     date(record.date);assert(text(record.building) && text(record.building).length<=255 && text(record.weekKey),'Invalid building check-in scope.');
     assert(text(record.supervisorName).length>=2 && text(record.supervisorName).length<=255 && text(record.operator?.name),'Record the supervisor and person reporting.');
@@ -184,7 +195,7 @@
       assert(Array.isArray(record.workflows) && record.workflows.length>0 && record.workflows.length<=100 && record.workflows.every(row=>workGroup(row) === record.groupId),'Invalid work-group workflow scope.');
       assert(stable(record.commodities) === stable([...new Set(record.workflows.map(row=>R.canonical(row.commodity)))].sort()),'Work-group commodities do not match.');
     }
-    assert(record.batchId === noProgressBatchId({weekKey:record.weekKey,operator:record.operator},record.building,record.date,record.groupId,record.supervisorKey,record.batchGeneration || ''),'Building check-in batch scope does not match.');return record;
+    if(record.batchId.startsWith('DL-NP-'))assert(record.batchId === noProgressBatchId({weekKey:record.weekKey,operator:record.operator},record.building,record.date,record.groupId,record.supervisorKey,record.batchGeneration || ''),'Building check-in batch scope does not match.');return record;
   }
   const personKey=value=>text(value).replace(/\s+/g,' ').toLowerCase();
   function workConflicts(session,model,building,groupId,day){
@@ -202,7 +213,7 @@
       supervisorName:name,operator:copy(previous?.operator || session.operator),recordedAt:now,workflows:copy(scope.workflows),commodities:[...new Set(scope.workflows.map(row=>row.commodity))].sort(),ruleVersion:R.gates.version,
       history:previous?[...copy(previous.history || []),{name:previous.supervisorName,recordedAt:previous.recordedAt,revision:previous.revision}]:[]};
     record.batchGeneration=previous && batchSealed(session,previous.batchId)?uid('G-'):previous?.batchGeneration || '';
-    record.batchId=noProgressBatchId({weekKey:session.weekKey,operator:record.operator},building,day,groupId,record.supervisorKey,record.batchGeneration);validateCheckin(record);
+    record.batchId=previous && !batchSealed(session,previous.batchId)?previous.batchId:freshBatchId(session,now);validateCheckin(record);
     session.checkins=(session.checkins || []).filter(value=>value.id !== record.id).concat(record);return record;
   }
   function saveBuildingCheckin(session,model,building,name,day,now=new Date().toISOString()){
@@ -213,7 +224,7 @@
       supervisorName:text(name),previousSupervisorName:previous?.supervisorName || '',operator:copy(session.operator),recordedAt:now,
       commodities:[...new Set(model.items.filter(item=>item.building === building && item.origin === 'Weekly Plan').map(item=>item.commodity))].sort(),history:previous?[...copy(previous.history || []),{name:previous.supervisorName,recordedAt:previous.recordedAt,revision:previous.revision}]:[]};
     record.batchGeneration=previous && batchSealed(session,previous.batchId)?uid('G-'):previous?.batchGeneration || '';
-    record.batchId=noProgressBatchId({weekKey:session.weekKey,operator:record.operator},building,day,'','',record.batchGeneration);
+    record.batchId=previous && !batchSealed(session,previous.batchId)?previous.batchId:freshBatchId(session,now);
     validateCheckin(record);session.checkins=(session.checkins || []).filter(value=>value.id !== record.id).concat(record);return record;
   }
   const pendingCheckins=(session,day)=>(session.checkins || []).filter(record=>record.date === day && !exported(session,record));
@@ -272,9 +283,9 @@
     const record=recordFor(session,editor.date,item.id);
     return record?previousFor(session,model,item,editor.date,batchSealed(session,record.batchId)?'next-edit':record.batchId,editor.fields):editor.previous;
   }
-  function batchFor(session,item,day) {
+  function batchFor(session,item,day,now=new Date().toISOString()) {
     const key = R.key(session.weekKey,day,item.building,session.operator.email || session.operator.name);
-    if (!session.batches[key] || batchSealed(session,session.batches[key])) session.batches[key] = uid('DL-');
+    if (!session.batches[key] || batchSealed(session,session.batches[key])) session.batches[key] = freshBatchId(session,now);
     return session.batches[key];
   }
   function saveEditor(session,model,item,editor,now = new Date().toISOString()) {
@@ -282,7 +293,7 @@
     const existing = recordFor(session,editor.date,item.id);
     if (existing && !editorDirty(session,editor)) { delete session.editors[editorKey(editor.date,item.id)]; return existing; }
     const revision = (existing?.revision || 0) + 1;
-    const batchId=existing && !batchSealed(session,existing.batchId)?existing.batchId:batchFor(session,item,editor.date);
+    const batchId=existing && !batchSealed(session,existing.batchId)?existing.batchId:batchFor(session,item,editor.date,now);
     const record = {id:existing?.id || uid('WR-'),revision,itemId:item.id,batchId,
       date:date(editor.date),weekKey:session.weekKey,fields:copy(editor.fields),previous:copy(existing?previousFor(session,model,item,editor.date,batchId,editor.fields):editor.previous),
       photos:copy(editor.photos),operator:copy(existing?.operator || session.operator),config:copy(session.config || model.config),ruleVersion:R.gates.version,
@@ -389,11 +400,11 @@
       record.revision+=1;record.history ||= [];
       if(isCheckin(record)){
         record.history.push({revision:entry.record.revision,name:entry.record.supervisorName,recordedAt:entry.record.recordedAt});record.recordedAt=now;
-        if(batchSealed(session,record.batchId)){record.batchGeneration=uid('NP-');record.batchId=noProgressBatchId({weekKey:record.weekKey,operator:record.operator},record.building,record.date,record.groupId || '',record.supervisorKey || '',record.batchGeneration);}
+        if(batchSealed(session,record.batchId)){record.batchGeneration=uid('NP-');record.batchId=freshBatchId(session,now);}
         session.checkins.push(record);
       }else{
         record.history.push({...copy(entry.record),history:undefined});record.savedAt=now;
-        if(batchSealed(session,record.batchId)){record.batchId=batchFor(session,model.items.find(item=>item.id === record.itemId),record.date);record.previous=previousFor(session,model,model.items.find(item=>item.id === record.itemId),record.date,record.batchId,record.fields);}
+        if(batchSealed(session,record.batchId)){record.batchId=batchFor(session,model.items.find(item=>item.id === record.itemId),record.date,now);record.previous=previousFor(session,model,model.items.find(item=>item.id === record.itemId),record.date,record.batchId,record.fields);}
         session.records.push(record);
       }
     }
@@ -465,7 +476,7 @@
     refs.push({...refs[0],ECSCode:'ECS-201',Description:'Support bracket outside weekly plan'});
     return prepareRows(weekly,refs);
   }
-  const api = {VERSION,R,copy,text,uid,stable,assert,date,config,gate,reportedPercent,prepareRows,pack,unpack,createSession,editorKey,recordFor,hasFields,essence,fingerprint,
+  const api = {VERSION,R,copy,text,uid,newBatchId,stable,assert,date,config,gate,reportedPercent,prepareRows,pack,unpack,createSession,editorKey,recordFor,hasFields,essence,fingerprint,
     WORK_GROUPS,groupLabel,workGroup,rowGroup,recorder,groupScopes,scopeDisciplines,workConflicts,saveWorkCheckin,isCheckin,noProgressBatchId,validateCheckin,saveBuildingCheckin,pendingCheckins,roomChanged,validateProgress,previousFor,previousForEdit,editorFor,editorDirty,setEditor,saveEditor,validateRecord,approvalFor,exported,pending,sign,visibleItems,search,addCandidate,candidateRemoval,removeCandidate,deleteEntry,restoreCheck,restoreEntry,hiddenPhotoIds,position,validateSession,photoPath,example,today:R.londonDate};
   if (typeof module === 'object' && module.exports) module.exports = api; else root.WeeklyCore = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
