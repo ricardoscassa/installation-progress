@@ -10,6 +10,7 @@ Open the app online once and wait for **Offline ready**. Import a prepared weekl
 
 - Navigate rooms and open one ECS card at a time. Additional ECS are found through the room's typed search.
 - Record gates, percentages, comments and optional photos. Field reporting is limited to 90%.
+- Compare the previous site report with the Mpower claim inside each expanded card. Mpower is a reference and does not determine the reported position or card colour.
 - Review the daily draft and record the supervisor's name. Changes after review require another review.
 - ECS at 90% remain editable. Correct a mistaken local selection or update its comments and photos; the reporting maximum remains 90%.
 - Delete a daily entry from its editor or draft. Undo is available in the collapsed Deleted entries section for the loaded week, including its saved photos. Weekly-plan cards remain available. Restored work requires fresh review.

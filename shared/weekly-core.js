@@ -3,7 +3,7 @@
   'use strict';
   const R = typeof module === 'object' && module.exports ? require('./production-core.js') : root.ProductionCore;
   const copy = R.copy, text = R.text;
-  const VERSION = '1.3.2';
+  const VERSION = '1.3.3';
   // Reporting ownership is separate from the ECS gate/field workflow.
   // Add a group here when another team joins; gate definitions remain unchanged.
   const WORK_GROUPS = [
@@ -70,19 +70,15 @@
       if (!refs.has(key)) refs.set(key,[]);
       refs.get(key).push(row);
     });
-    const effective = row => ({
-      gate: gate(row?.ReportedGateStatus) || gate(row?.GateStatus),
-      percent: reportedPercent(row) ?? row?.PercentComplete
-    });
+    // Mpower is a comparison claim, never a field-reporting baseline.
+    const effective = row => ({gate:reportedPercent(row) !== null?gate(row?.ReportedGateStatus):'',percent:reportedPercent(row) ?? 0});
     const headings = ['Week','Building','Room','Commodity','ECS-code','GateStatusStructure','GateStatus','PercentComplete','SourceUpdatedAt','Description'];
     const baselines = new Map();
     const weeklyRows = weekly.map(row => {
       const candidates = refs.get(R.key(row.Building,row.ECSCode)) || [];
       const ref = candidates.find(r => R.norm(r.Room) === R.norm(row.Room) && R.canonical(r.Commodity) === R.canonical(row.Commodity)) || {};
-      const current = {
-        gate:gate(ref.ReportedGateStatus) || gate(row.LatestGateStatus) || gate(ref.GateStatus),
-        percent:reportedPercent(ref) ?? row.LatestPercent ?? ref.PercentComplete
-      };
+      const reported=reportedPercent(ref),current=reported !== null?{gate:gate(ref.ReportedGateStatus),percent:reported}:
+        {gate:gate(row.LatestGateStatus),percent:row.LatestPercent ?? 0};
       baselines.set(R.key(row.Building,row.ECSCode),{...current,room:row.Room,commodity:R.canonical(row.Commodity)});
       return [row.WeekKey,row.Building,row.Room,row.Commodity,row.ECSCode,row.GateStatusStructure || ref.GateStatusStructure,
         current.gate,current.percent ?? row.LatestPercent,ref.SourceUpdatedAt || row.LastReportedDate,ref.Description || row.Description];

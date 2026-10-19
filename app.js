@@ -5,6 +5,7 @@
   let session=null,model=null,photos=[],pendingPhotos=[],queue=Promise.resolve(),committedVersion=0,storageFailed=false,offlineReady=false;
   let stagedModel=null,searchOpen=false,searchValue='',today=W.today(),busy=false,lastCheckpoint=0,objectUrls=[];
   let cameraPending=null,processedPhoto=null,workerRegistration=null,inputSaveTimer=null,noticeTimer=null,preparedDownloadURL=null;
+  let comparisonObserver=null;
   const waitingActions=[];
   const h=(tag,className='',value='')=>{const el=document.createElement(tag);if(className)el.className=className;if(value !== '')el.textContent=String(value);return el;};
   function icon(name){const svg=document.createElementNS('http://www.w3.org/2000/svg','svg'),use=document.createElementNS(svg.namespaceURI,'use');use.setAttribute('href','#i-'+name);svg.append(use);svg.setAttribute('aria-hidden','true');return svg;}
@@ -99,7 +100,7 @@
     return (record.previous.percent ?? '—')+'% → '+(v.reportedPercent ?? '—')+'% · '+(record.fields.gate || 'Gate needed');
   }
   function gateLabel(code){return ({'1ENDS_CUT':'Ends cut','2PREP_TACK':'Preparation & tack','3WELDING':'Welding','1HAND_POS':'Handling & positioning','2INST_DUCT':'Duct installation'}[code]) || code.replace(/^\d+/,'').replace(/_/g,' ');}
-  function resetContent(){revoke();content.replaceChildren();$('week-label').textContent=model?model.reportingWeek:'';$('day-label').textContent=today.slice(5).split('-').reverse().join('/');}
+  function resetContent(){comparisonObserver?.disconnect();comparisonObserver=null;revoke();content.replaceChildren();$('week-label').textContent=model?model.reportingWeek:'';$('day-label').textContent=today.slice(5).split('-').reverse().join('/');}
   function render(){
     resetContent();$('bottom-menu').hidden=!session;$('settings-button').hidden=!session;
     if(!session){renderLoad();return;}
@@ -239,7 +240,7 @@
   }
   function renderEditor(item,day){
     const editor=W.editorFor(session,model,item,day),body=h('div','ecs-editor'),flow=R.workflow(item),cfg=currentConfig();
-    body.append(h('p','subtle','Previous: '+(editor.previous.gate || '—')+' · '+(editor.previous.percent ?? '—')+'%'));
+    body.append(progressComparison(item,editor.previous));
     const validation=h('div');validation.id='editor-validation';
     const readiness=()=>{
       validation.replaceChildren();if(!W.hasFields(editor.fields))return;
@@ -350,6 +351,25 @@
       const check=W.restoreCheck(session,entry),undo=button('Undo deletion',async()=>{W.restoreEntry(session,model,entry.id);await persist();render();notice('Entry restored. Review it again before exporting.');scheduleCheckpoint();},'button block');undo.dataset.restoreEntry=entry.id;undo.disabled=!check.allowed;box.append(undo);
       if(!check.allowed)box.append(h('p','subtle',check.reason));group.append(box);
     });parent.append(group);
+  }
+  function progressComparison(item,previous){
+    const row=h('div','progress-comparison'),prior=h('span','comparison-previous'),mpower=h('span','comparison-mpower'),divider=h('span','comparison-divider','|');
+    const priorGate=previous.gate?gateLabel(previous.gate):'',mpowerGate=item.mpowerGate?gateLabel(item.mpowerGate):'';
+    prior.append(h('span','comparison-label','Previous:'),h('span','comparison-gate',priorGate),h('span','comparison-percent',previous.percent == null?'Not recorded':(priorGate?'– ':'')+previous.percent+'%'));
+    mpower.append(h('span','comparison-label','Mpower:'),h('span','comparison-mpower-gate',mpowerGate),h('span','comparison-percent',item.mpowerPercent == null?'—':item.mpowerPercent+'%'));
+    prior.title='Previous site report: '+(priorGate?priorGate+' · ':'')+(previous.percent == null?'Not recorded':previous.percent+'%');
+    mpower.title='Mpower comparison: '+(mpowerGate?mpowerGate+' · ':'')+(item.mpowerPercent == null?'Not recorded':item.mpowerPercent+'%');
+    row.append(prior,divider,mpower);
+    const fit=()=>{
+      if(!row.isConnected || !row.clientWidth)return;
+      row.classList.remove('compact-mpower');
+      const priorWidth=[...prior.children].reduce((width,el)=>width+Math.max(el.scrollWidth,el.getBoundingClientRect().width),0)+6;
+      row.classList.toggle('compact-mpower',priorWidth+mpower.getBoundingClientRect().width+divider.getBoundingClientRect().width+12>row.clientWidth);
+    };
+    comparisonObserver?.disconnect();
+    if(typeof ResizeObserver === 'function'){comparisonObserver=new ResizeObserver(fit);comparisonObserver.observe(row);requestAnimationFrame(fit);}
+    else row.classList.add('compact-mpower');
+    return row;
   }
   function renderSearch(room){
     const box=h('section','search-container');box.id='candidate-search';

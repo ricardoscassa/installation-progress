@@ -45,5 +45,9 @@ h1{font-size:25px}h2{font-size:19px;margin-top:20px}h3{font-size:15px;margin-top
 .building-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:20px 0 12px}.building-heading h2{margin:0}.building-heading .button{font-size:12px;padding:7px 10px;min-height:44px}
 .room-choice{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;min-height:50px;padding:10px 4px;background:white;border:0;border-bottom:1px solid var(--line);text-align:left}
 .review-progress{margin-left:auto;font-size:13px;font-weight:650;white-space:nowrap}.draft-record>summary .spread{flex-wrap:nowrap;gap:9px}.draft-record>summary strong{overflow-wrap:anywhere;min-width:0}.draft-record>summary svg{width:17px;height:17px}
+.progress-comparison{display:flex;align-items:baseline;gap:6px;margin:9px 0;color:var(--muted);font-size:12px;line-height:1.5;white-space:nowrap;min-width:0}
+.comparison-previous,.comparison-mpower{display:inline-flex;align-items:baseline;gap:3px;min-width:0}.comparison-previous{flex:0 1 auto}.comparison-mpower{flex:0 0 auto}
+.comparison-label,.comparison-percent{flex-shrink:0}.comparison-gate{min-width:0;overflow:hidden;text-overflow:ellipsis}.comparison-divider{color:#a4adb5;flex-shrink:0}
+.comparison-gate:empty,.comparison-mpower-gate:empty,.compact-mpower .comparison-mpower-gate{display:none}
 .button[aria-pressed=true]{background:#fff0e4;border-color:var(--orange);color:var(--orange)}
 .checkin-owner{display:block;margin-top:4px;color:var(--muted);font-size:13px}
