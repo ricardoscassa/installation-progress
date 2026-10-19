@@ -1,7 +1,8 @@
 (function(){
   'use strict';
   const W=WeeklyCore,R=W.R,F=WeeklyFiles,S=WeeklyStorage;
-  const $=id=>document.getElementById(id),content=$('content'),modal=$('modal'),modalBody=$('modal-body'),cameraInput=$('camera-input');
+  const $=id=>document.getElementById(id),content=$('content'),modal=$('modal'),modalBody=$('modal-body');
+  let cameraInput=$('camera-input'),captureFlight=null,foregroundRecovery=null,photoDrawEpoch=0,preparedPhotoURL=null;
   let session=null,model=null,photos=[],pendingPhotos=[],queue=Promise.resolve(),committedVersion=0,storageFailed=false,offlineReady=false;
   let stagedModel=null,searchOpen=false,searchValue='',today=W.today(),busy=false,lastCheckpoint=0,objectUrls=[];
   let cameraPending=null,processedPhoto=null,workerRegistration=null,inputSaveTimer=null,noticeTimer=null,preparedDownloadURL=null;
@@ -52,8 +53,8 @@
   function revoke(){objectUrls.forEach(url=>URL.revokeObjectURL(url));objectUrls=[];}
   function image(photo,cls=''){const el=h('img',cls);const url=URL.createObjectURL(photo.blob);objectUrls.push(url);el.loading=cls === 'preview-photo'?'eager':'lazy';el.decoding='async';el.src=url;el.alt=photo.ecsCode+' · '+photo.building+' · '+photo.room;return el;}
   function download(blob,name){const url=URL.createObjectURL(blob),anchor=document.createElement('a');anchor.href=url;anchor.download=name;document.body.append(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);}
-  function releaseDownload(){if(preparedDownloadURL){const url=preparedDownloadURL;preparedDownloadURL=null;setTimeout(()=>URL.revokeObjectURL(url),60000);}}
-  function closeDialog(){modal.close();modalBody.replaceChildren();cameraPending=null;processedPhoto=null;releaseDownload();}
+  function releaseDownload(){for(const url of [preparedDownloadURL,preparedPhotoURL].filter(Boolean))setTimeout(()=>URL.revokeObjectURL(url),60000);preparedDownloadURL=null;preparedPhotoURL=null;}
+  function closeDialog(){photoDrawEpoch++;modal.close();modalBody.replaceChildren();cameraPending=null;processedPhoto=null;releaseDownload();}
   function dialog(title){
     releaseDownload();modalBody.replaceChildren();const row=h('div','dialog-heading'),close=button('×',closeDialog,'dialog-close');close.setAttribute('aria-label','Close dialog');
     row.append(h('h2','',title),close);modalBody.append(row);if(!modal.open)modal.showModal();return modalBody;
@@ -301,8 +302,7 @@
     const latestPrevious=W.previousFor(session,model,item,day);
     if(W.stable(latestPrevious) !== W.stable(editor.previous))body.append(button('Review updated previous progress',async()=>{editor.previous=latestPrevious;W.setEditor(session,editor);await persist();body.replaceWith(renderEditor(item,day));},'button block'));
     const actions=h('div','camera-action'),camera=h('label','icon-button camera-trigger');camera.title='Take photo for '+item.ecsCode;
-    cameraInput.hidden=false;cameraInput.className='native-camera-input';cameraInput.dataset.camera='true';cameraInput.setAttribute('aria-label',camera.title);
-    cameraInput.onclick=event=>{if(busy){event.preventDefault();return;}try{cameraInput.value='';startCamera(item,editor).catch(showError);}catch(error){event.preventDefault();showError(error);}};
+    bindCamera(item,editor);
     camera.append(icon('camera'),cameraInput);
     actions.append(camera,h('span','subtle',editor.photos.length+' photo'+(editor.photos.length === 1?'':'s')),button('Save progress',async()=>{
       W.setEditor(session,editor);W.saveEditor(session,model,item,editor);session.ui.expanded='';session.ui.editDate='';await persist();renderRooms();notice('Daily record saved. Review it in Draft.');scheduleCheckpoint();
@@ -467,7 +467,7 @@
     body.append(field('Supervisor name',name),label,sign,h('p','subtle','Later edits require renewed approval. Previous approvals remain in history.'));
   }
   function renderExport(){
-    resetContent();heading('Daily export','TAKE YOUR WORK BACK','A daily CSV and complete recovery backup in one download.');
+    resetContent();heading('Daily export','TAKE YOUR WORK BACK','CSV and recovery data, with photos in a separate companion ZIP.');
     const days=[...new Set([today,...session.records.map(record=>record.date),...(session.checkins || []).map(record=>record.date),...session.exports.map(entry=>entry.date).filter(Boolean)])].sort().reverse(),daySelect=select(days.map(day=>({value:day,label:dayLabel(day)})),days.includes(session.ui.exportDay)?session.ui.exportDay:today),body=h('div');
     daySelect.id='export-day';content.append(field('Work day',daySelect),body);
     const update=()=>{
@@ -479,14 +479,14 @@
       if(records.length)body.append(pill(approved?(records.every(W.isCheckin)?'Supervisor names recorded':'Supervisor approval saved'):'Supervisor review needed',approved?'good':''));
       else body.append(h('p','green-text',exported.length?'All saved records for this day have a prepared download below.':'No saved records for this day.'));
       const list=h('div','export-list');
-      [['export','Daily progress CSV','Only this day’s new or changed records; includes all entered daily-log fields.'],['down','Full recovery backup','Week, drafts, history, approvals and every saved photo byte.']].forEach(([symbol,title,desc])=>{const row=h('div'),text=h('div');text.append(h('strong','',title),h('p','subtle',desc));row.append(icon(symbol),text);list.append(row);});if(records.length)body.append(list);
+      [['export','Daily progress CSV','Only this day’s new or changed records; includes all entered daily-log fields.'],['down','Recovery data + companion photos','Week, drafts, history and approvals. Keep both ZIPs to restore all photos, including earlier work and interrupted captures.']].forEach(([symbol,title,desc])=>{const row=h('div'),text=h('div');text.append(h('strong','',title),h('p','subtle',desc));row.append(icon(symbol),text);list.append(row);});if(records.length)body.append(list);
       const exp=button('Download daily package',async()=>{
         await flush();W.assert(!Object.values(session.editors).some(editor=>editor.date === day && W.editorDirty(session,editor)),'Finish the saved editor changes before exporting this day.');
         saving('Preparing export…');const result=await F.dailyZip(session,model,records,photos,pendingPhotos);
         await offerDailyDownload(result);
       },'button primary block','down');exp.id='daily-export';exp.disabled=!approved || !!errors.length;if(records.length)body.append(exp);
       if(records.length && !approved && !errors.length)body.append(button('Review & sign first',()=>reviewDay(day),'link-button'));
-      if(records.length)body.append(h('p','subtle','Includes daily.csv, supervisor approval, full recovery and photo bytes.'));
+      if(records.length)body.append(h('p','subtle','The data ZIP has no image bytes. A companion photo ZIP is prepared whenever recovery needs photos.'));
       const history=session.exports.filter(entry=>entry.kind === 'daily' && entry.date === day).slice().reverse();
       if(history.length){body.append(h('h2','','Previous downloads'));history.forEach(entry=>{
         const box=h('div','history-entry');box.dataset.exportId=entry.id;box.append(h('strong','',time(entry.createdAt)+' · '+entry.records.length+' records'),h('p','subtle',entry.status === 'download-started'?'Download started · available again':'Prepared · ready to retry'));
@@ -499,19 +499,25 @@
   async function offerDailyDownload(result){
     session=result.future;await persist();render();
     const buildingCount=result.log.records.filter(row=>W.isCheckin(row.payload.record)).length,ecsCount=result.log.records.length-buildingCount;
-    const body=dialog('Your daily package is ready');body.append(h('p','',dayLabel(result.log.date)+' · '+ecsCount+' ECS items'+(buildingCount?' · '+buildingCount+' building check-in'+(buildingCount === 1?'':'s'):'')+'. Includes the CSV, full recovery backup and photos.'));
+    const body=dialog('Your daily package is ready');body.append(h('p','',dayLabel(result.log.date)+' · '+ecsCount+' ECS items'+(buildingCount?' · '+buildingCount+' building check-in'+(buildingCount === 1?'':'s'):'')+'. CSV and recovery data contain no image bytes.'));
     preparedDownloadURL=URL.createObjectURL(result.blob);
-    const save=h('a','button primary block','Save ZIP file');save.href=preparedDownloadURL;save.download='daily_progress_'+result.log.date+'_'+result.log.id+'.zip';save.id='save-daily-file';
+    const save=h('a','button primary block',result.photoBlob?'Save data + photos':'Save ZIP file');save.href=preparedDownloadURL;save.download='daily_progress_'+result.log.date+'_'+result.log.id+'.zip';save.id='save-daily-file';
+    let photoSave=null;
+    if(result.photoBlob){preparedPhotoURL=URL.createObjectURL(result.photoBlob);photoSave=h('a','button block','Save / retry companion photo ZIP');photoSave.id='save-companion-photos';photoSave.href=preparedPhotoURL;photoSave.download='daily_photos_'+result.log.date+'_'+result.log.id+'.zip';photoSave.addEventListener('click',()=>{const entry=session.exports.find(value=>value.id === result.log.id);entry.photoDownloadStartedAt=new Date().toISOString();persist().catch(showError);});}
     // This native link is tapped after ZIP preparation, retaining Safari's download gesture.
     save.addEventListener('click',()=>{
       const entry=session.exports.find(value=>value.id === result.log.id);entry.status='download-started';entry.lastDownloadAt=new Date().toISOString();entry.downloadCount=(entry.downloadCount || 0)+1;
+      entry.pairId=result.pair.id;entry.lastRecoveryHash=result.pair.recoverySha256;
+      // Both files are already prepared. This click retains a native download gesture.
+      if(photoSave)photoSave.click();
       persist().then(()=>{render();scheduleCheckpoint();}).catch(showError);
       notice('Download started. The same package remains available in Previous downloads.');
     });
-    body.append(save,h('p','subtle','Save in Files or OneDrive. If interrupted or deleted, use Download package again on the Export screen.'));
+    body.append(save);if(photoSave)body.append(photoSave,h('p','note','Save BOTH ZIPs for complete restoration. If only one download starts, use the companion link above. A started download does not confirm that Files saved it.'));
+    body.append(h('p','subtle','Save in Files or OneDrive. If interrupted or deleted, use Download package again on the Export screen.'));
   }
   function renderPhotos(){
-    resetContent();heading('Photos','EVIDENCE',model.reportingWeek+' · Building - Date folders');
+    resetContent();heading('Photos','EVIDENCE',model.reportingWeek+' · Building / capture date folders');
     const hidden=W.hiddenPhotoIds(session),available=photos.filter(photo=>!hidden.has(photo.id));
     const dates=[...new Set(available.map(photo=>photo.captureDate))].sort().reverse(),choices=[{value:'all',label:'Whole week'},...dates.map(day=>({value:day,label:dayLabel(day)}))];
     const picker=select(choices,dates.includes(today)?today:'all'),body=h('div');content.append(field('Captured day',picker),body);
@@ -519,7 +525,7 @@
       body.replaceChildren();const selected=available.filter(photo=>picker.value === 'all' || photo.captureDate === picker.value);
       body.append(h('p','subtle',selected.length+' saved photos'));
       body.append(photoGrid(selected.map(photo=>photo.id)));
-      const exp=button('Download photo ZIP',async()=>{await flush();const blob=await F.photoZip(selected);download(blob,'progress_photos_'+picker.value+'_'+W.uid()+'.zip');notice('Photo ZIP download initiated. Folders use Building - capture date.');},'button primary block','down');exp.disabled=!selected.length;body.append(exp);
+      const exp=button('Download photo ZIP',async()=>{await flush();const blob=await F.photoZip(selected);download(blob,'progress_photos_'+picker.value+'_'+W.uid()+'.zip');notice('Photo ZIP download initiated. New photos use Building / capture date folders.');},'button primary block','down');exp.disabled=!selected.length;body.append(exp);
       if(pendingPhotos.length)body.append(button('Resume interrupted photo',()=>resumePhoto(pendingPhotos[0]),'button block'));
     };
     picker.onchange=update;update();
@@ -531,23 +537,41 @@
     // its picker in the original touch/click event, without awaiting IndexedDB first.
     return persist();
   }
-  async function acceptCamera(file){
+  function bindCamera(item,editor){
+    const native=cameraInput;native.hidden=false;native.className='native-camera-input';native.dataset.camera='true';native.setAttribute('aria-label','Take photo for '+item.ecsCode);
+    native.onclick=event=>{if(busy){event.preventDefault();notice('Finishing the current operation. Tap the camera again when ready.');return;}try{
+      if(native.files?.length){event.preventDefault();return;}
+      native.value='';startCamera(item,editor).catch(showError);captureFlight={input:native,context:W.copy(session.pendingCapture),sessionId:session.id};native.captureFlight=captureFlight;
+    }catch(error){event.preventDefault();showError(error);}};
+    native.onchange=event=>{const file=event.target.files[0],flight=native.captureFlight,context=flight?.context || W.copy(session?.pendingCapture);if(file){if(captureFlight===flight)captureFlight=null;native.captureFlight=null;run(()=>acceptCamera(file,context,flight?.sessionId)).finally(()=>{native.value='';});}};
+    native.oncancel=()=>{const flight=native.captureFlight;if(!flight || flight!==captureFlight)return;captureFlight=null;native.captureFlight=null;native.value='';if(session?.id===flight.sessionId && session.pendingCapture?.startedAt===flight.context.startedAt && !pendingPhotos.length){session.pendingCapture=null;persist().catch(showError);}};
+  }
+  function renewIdleCamera(){
+    if(captureFlight || cameraPending || cameraInput.files?.length)return;
+    const replacement=cameraInput.cloneNode(false);replacement.value='';cameraInput.replaceWith(replacement);cameraInput=replacement;
+    const editor=activeEditor(),item=editor && sourceItem(editor.itemId);if(item)bindCamera(item,editor);
+  }
+  async function acceptCamera(file,capturedContext=null,sessionId=session?.id){
     W.assert(file && file.type.startsWith('image/') && file.size>0 && file.size <= 25*1024*1024,'Choose an image up to 25 MB.');
-    const context=session.pendingCapture;W.assert(context,'The camera target is missing. Open the ECS and try again.');
+    const context=capturedContext || session.pendingCapture;W.assert(context && session.id === sessionId,'The camera target changed. Keep this original file and reopen its ECS.');
     const raw=new Uint8Array(await file.arrayBuffer()),pending={id:W.uid('PH-'),itemId:context.itemId,workDate:context.workDate,
       building:context.building,room:context.room,ecsCode:context.ecsCode,capturedAt:new Date().toISOString(),captureDate:W.today(),
       context:W.copy(context),blob:file,type:file.type,size:file.size,sha256:await F.sha(raw),crc32:F.crc32(raw)};
+    W.assert(session.id === sessionId,'The active week changed during capture.');
     await persist({pending});pendingPhotos.push(pending);await resumePhoto(pending);
   }
   async function resumePhoto(pending){
     cameraPending=pending;processedPhoto=null;
     const body=dialog('Photo stamp');cameraPending=pending;
+    const drawEpoch=++photoDrawEpoch,sessionId=session.id;
     body.append(h('p','subtle',pending.ecsCode+' · '+pending.building+' · '+pending.room+' · '+pending.workDate));
     const canvas=h('canvas');canvas.setAttribute('aria-label','Photo with captured ECS context');body.append(canvas);
     const noteInput=input('text','','Optional photo note');body.append(field('Photo note',noteInput));
     const status=h('p','subtle','Preparing captured image…'),save=button('Save photo',async()=>{
       W.assert(processedPhoto && cameraPending,'Wait for the stamped image.');
-      const photo={...pending,blob:processedPhoto,type:'image/jpeg',size:processedPhoto.size,sha256:await F.sha(processedPhoto),crc32:F.crc32(await F.bytes(processedPhoto)),note:noteInput.value,originalSha256:pending.sha256};
+      const stamped=processedPhoto;W.assert(drawEpoch === photoDrawEpoch && cameraPending?.id === pending.id && session.id === sessionId,'This photo editor has changed. Reopen the retained capture.');
+      const photo=W.namePhoto({...pending,blob:stamped,type:'image/jpeg',size:stamped.size,sha256:await F.sha(stamped),crc32:F.crc32(await F.bytes(stamped)),note:noteInput.value,originalSha256:pending.sha256},photos);
+      W.assert(drawEpoch === photoDrawEpoch && session.id === sessionId,'The capture context changed while saving.');
       const item=sourceItem(pending.itemId),editor=W.editorFor(session,model,item,pending.workDate);
       if(!editor.photos.includes(photo.id))editor.photos.push(photo.id);W.setEditor(session,editor);session.pendingCapture=null;
       await persist({photo,deletePending:pending.id});photos=photos.filter(value=>value.id !== photo.id).concat(photo);pendingPhotos=pendingPhotos.filter(value=>value.id !== pending.id);
@@ -566,7 +590,7 @@
         const fields=pending.context.editor.fields,previous=pending.context.editor.previous;
         const gate=fields.noProgress?previous.gate:fields.gate,percent=fields.noProgress?previous.percent:fields.percent;
         [pending.building+' · '+pending.room+' · '+pending.ecsCode,pending.captureDate+' · '+(gate || 'Gate not recorded')+' · '+(percent ?? '—')+'%'+(fields.noProgress?' · No Progress':''),noteInput.value].forEach((line,index)=>context.fillText(line,14,pictureHeight+30+index*32,canvas.width-28));
-        const result=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',.82));if(version !== drawVersion)return;processedPhoto=result;save.disabled=!processedPhoto;status.textContent='Captured context is preserved with the photo.';
+        const result=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',.82));if(version !== drawVersion || drawEpoch !== photoDrawEpoch || cameraPending?.id !== pending.id || session.id !== sessionId || !canvas.isConnected)return;processedPhoto=result;save.disabled=!processedPhoto;status.textContent='Captured context is preserved with the photo.';
       };
       noteInput.addEventListener('input',()=>{save.disabled=true;draw().catch(showError);});await draw();
     }catch(error){status.textContent='This image could not be decoded. Its original bytes are retained in recovery. '+error.message;}
@@ -575,7 +599,7 @@
     await flush();const body=dialog('Recovery backups'),snapshots=(await S.snapshots()).sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
     body.append(h('p','subtle','Local snapshots survive app reset. External backups are needed after browser storage deletion.'));
     if(session)body.append(button('Download full recovery backup',async()=>{const data=await F.recoveryData(session,model,photos,pendingPhotos);download(await F.zip(data.entries),'progress_recovery_'+today+'_'+W.uid()+'.zip');},'button primary block','down'));
-    body.append(button('Import recovery backup',()=>{$('recovery-input').click();},'button block'));
+    body.append(button('Import recovery backup',()=>{$('recovery-input').value='';$('recovery-input').click();},'button block'),h('p','subtle','For daily backups, select the data ZIP and companion photo ZIP together. Older full backups need one file.'));
     snapshots.forEach(snapshot=>{
       const box=h('div','history-entry');box.append(h('strong','',time(snapshot.createdAt)),h('p','subtle',snapshot.reason+' · '+snapshot.session.records.length+' records · '+snapshot.photos.length+' photos'));
       box.append(button('Restore',async()=>{
@@ -642,9 +666,7 @@
     }catch(error){showError(error);content.replaceChildren(h('h1','','Saved work needs recovery'),button('Open recovery backups',recoveryMenu,'button primary block'));$('settings-button').hidden=true;}
   }
   $('package-input').addEventListener('change',event=>run(async()=>{const file=event.target.files[0];if(!file)return;stagedModel=await F.readWeekly(file);closeDialog();renderLoad();}));
-  $('recovery-input').addEventListener('change',event=>run(async()=>{const file=event.target.files[0];if(!file)return;const restored=await F.readRecovery(file);if(session)await checkpoint('Before importing recovery');session=await S.replace(restored.session,restored.model,restored.photos,restored.pending);model=restored.model;photos=restored.photos;pendingPhotos=restored.pending;committedVersion=0;queue=Promise.resolve();storageFailed=false;closeDialog();render();notice('External recovery verified and restored.');}));
-  cameraInput.addEventListener('change',event=>{const file=event.target.files[0];if(file)run(()=>acceptCamera(file));});
-  cameraInput.addEventListener('cancel',()=>{if(session?.pendingCapture && !pendingPhotos.length){session.pendingCapture=null;persist().catch(showError);}});
+  $('recovery-input').addEventListener('change',event=>run(async()=>{const files=[...event.target.files];if(!files.length)return;const restored=await F.readRecoveryPair(files);if(session)await checkpoint('Before importing recovery');session=await S.replace(restored.session,restored.model,restored.photos,restored.pending);model=restored.model;photos=restored.photos;pendingPhotos=restored.pending;committedVersion=0;queue=Promise.resolve();storageFailed=false;captureFlight=null;closeDialog();render();notice('External recovery verified and restored.');}));
   $('settings-button').onclick=()=>run(settings);
   document.querySelectorAll('#bottom-menu button').forEach(el=>el.onclick=()=>run(()=>navigate(el.dataset.page)));
   let cornerCount=0,cornerTime=0;
@@ -662,12 +684,22 @@
     if(session?.ui.expanded)notice('A new work day has started. The open record stays on '+session.ui.editDate+'. Close it to start today’s work.');
     else if(session)render();
   }
-  setInterval(onDayChange,30000);window.addEventListener('focus',onDayChange);
-  document.addEventListener('visibilitychange',()=>{if(document.hidden && session){session.ui.scroll=content.scrollTop;S.journal(session);}else onDayChange();});
+  async function recoverForeground(){
+    if(document.hidden)return;if(foregroundRecovery)return foregroundRecovery;
+    foregroundRecovery=(async()=>{
+      await S.recover();await flush();
+      // Keep the rendered editor, work date, modal and scroll position. Never reset a returning picker.
+      if(!busy){content.inert=false;modalBody.inert=false;renewIdleCamera();}
+      onDayChange();
+    })().finally(()=>{foregroundRecovery=null;});return foregroundRecovery;
+  }
+  const foreground=()=>recoverForeground().catch(showError);
+  setInterval(onDayChange,30000);window.addEventListener('focus',foreground);window.addEventListener('pageshow',foreground);document.addEventListener('resume',foreground);
+  document.addEventListener('visibilitychange',()=>{if(document.hidden && session){session.ui.scroll=content.scrollTop;S.journal(session);}else foreground();});
   window.addEventListener('pagehide',()=>{if(session){session.ui.scroll=content.scrollTop;session.journalGeneration+=1;S.journal(session);}});
-  modal.addEventListener('cancel',()=>{cameraPending=null;processedPhoto=null;releaseDownload();});
+  modal.addEventListener('cancel',()=>{photoDrawEpoch++;cameraPending=null;processedPhoto=null;releaseDownload();});
   window.ProgressApp={get session(){return session;},get model(){return model;},get photos(){return photos;},get offlineReady(){return offlineReady;},
-    flush,persist,render,navigate,checkpoint,acceptCamera,saveOpen,onDayChange,storage:S,
+    flush,persist,render,navigate,checkpoint,acceptCamera,saveOpen,onDayChange,recoverForeground,storage:S,
     loadExample:async(name='Example worker')=>{stagedModel=null;if(session)await checkpoint('Before example replacement');model=W.example();session=await S.replace(W.createSession(model,{name}),model);photos=[];pendingPhotos=[];committedVersion=0;queue=Promise.resolve();storageFailed=false;render();},
     activate:async(value,operator={name:'Recorder'})=>{if(session)await checkpoint('Before package replacement');model=value;session=await S.replace(W.createSession(model,operator),model);photos=[];pendingPhotos=[];committedVersion=0;queue=Promise.resolve();storageFailed=false;render();}};
   boot();

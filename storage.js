@@ -6,25 +6,32 @@
   const open=(name,stores)=>new Promise((resolve,reject)=>{
     const request=indexedDB.open(name,1);
     request.onupgradeneeded=()=>stores.forEach(store=>request.result.createObjectStore(store,{keyPath:'id'}));
-    request.onsuccess=()=>{request.result.onversionchange=()=>request.result.close();resolve(request.result);};
+    request.onsuccess=()=>{const db=request.result,forget=()=>{if(name===DB)activePromise=null;else recoveryPromise=null;};db.onclose=forget;db.onversionchange=()=>{forget();db.close();};resolve(db);};
     request.onerror=()=>reject(request.error);request.onblocked=()=>reject(new Error('Another window is blocking progress storage. Close it and reopen this page.'));
   });
   let activePromise,recoveryPromise;
+  const transactions=new Set();
   let retentionQueue=Promise.resolve();
   function retain(action){
     if(root.navigator?.locks)return root.navigator.locks.request(DB+'-retention',action);
     const result=retentionQueue.then(action);retentionQueue=result.catch(()=>{});return result;
   }
-  const active=()=>activePromise ||= open(DB,['sessions','packages','photos','pending']);
-  const recovery=()=>recoveryPromise ||= open(RECOVERY,['snapshots']);
+  const active=()=>activePromise ||= open(DB,['sessions','packages','photos','pending']).catch(error=>{activePromise=null;throw error;});
+  const recovery=()=>recoveryPromise ||= open(RECOVERY,['snapshots']).catch(error=>{recoveryPromise=null;throw error;});
   async function transaction(stores,mode,action,other=false){
-    const db=await(other?recovery():active());
+    let db=await(other?recovery():active()),tx;
+    try{tx=db.transaction(stores,mode);}catch(error){
+      if(error.name !== 'InvalidStateError')throw error;
+      // No transaction began, so reconnecting here cannot repeat a committed write.
+      if(other)recoveryPromise=null;else activePromise=null;
+      db=await(other?recovery():active());tx=db.transaction(stores,mode);
+    }
     return new Promise((resolve,reject)=>{
-      const tx=db.transaction(stores,mode),objects=Object.fromEntries(stores.map(name=>[name,tx.objectStore(name)]));
+      const state={tx,startedAt:Date.now()},objects=Object.fromEntries(stores.map(name=>[name,tx.objectStore(name)]));transactions.add(state);
       let result;
-      try{result=action(objects,tx);}catch(error){tx.abort();reject(error);return;}
-      tx.oncomplete=()=>resolve(typeof result === 'function'?result():result);
-      tx.onabort=tx.onerror=()=>reject(tx.error || new Error('Progress storage could not be committed.'));
+      tx.oncomplete=()=>{transactions.delete(state);resolve(typeof result === 'function'?result():result);};
+      tx.onabort=()=>{transactions.delete(state);reject(state.error || tx.error || new DOMException('Progress storage could not be committed.','AbortError'));};
+      try{result=action(objects,tx);}catch(error){state.error=error;try{tx.abort();}catch{}transactions.delete(state);reject(error);}
     });
   }
   const readAll=(store,other=false)=>transaction([store],'readonly',objects=>{
@@ -53,9 +60,9 @@
   function journal(session,editorsOnly=false){
     try{const token=W.uid('JR-'),value=editorsOnly?{schema:1,kind:'editors',token,sessionId:session.id,packageId:session.packageId,generation:session.journalGeneration,editors:session.editors,ui:session.ui}:{schema:1,token,session};localStorage.setItem(JOURNAL,JSON.stringify(value));return token;}catch{return false;}
   }
-  async function save(session,{photo=null,deletePending=null,pending=null}={}){
+  async function save(session,{photo=null,deletePending=null,pending=null}={},attempt=0){
     const expected=session.storageVersion,next=W.copy(session);next.storageVersion=expected+1;
-    await transaction(['sessions','photos','pending'],'readwrite',(stores,tx)=>{
+    try{await transaction(['sessions','photos','pending'],'readwrite',(stores,tx)=>{
       const request=stores.sessions.get('active');
       request.onsuccess=()=>{
         if(!request.result || request.result.value.id !== next.id || request.result.value.storageVersion !== expected){tx.abort();return;}
@@ -64,8 +71,25 @@
         if(pending)stores.pending.put(pending);
         if(deletePending)stores.pending.delete(deletePending);
       };
-    });
+    });}catch(error){
+      // Suspension may lose a completion event. Inspect committed state before any retry.
+      const current=(await readAll('sessions')).find(row=>row.id === 'active')?.value;
+      if(current?.id === next.id && W.stable(current) === W.stable(next)){
+        const storedPhotos=photo?await readAll('photos'):[],storedPending=pending || deletePending?await readAll('pending'):[];
+        W.assert(!photo || storedPhotos.some(value=>value.id === photo.id && value.sha256 === photo.sha256 && value.blob?.size === photo.size),'Committed photo needs recovery.');
+        W.assert(!pending || storedPending.some(value=>value.id === pending.id && value.sha256 === pending.sha256 && value.blob?.size === pending.size),'Pending original needs recovery.');
+        W.assert(!deletePending || !storedPending.some(value=>value.id === deletePending),'Photo transaction needs recovery.');return next;
+      }
+      if(!attempt && current?.id === session.id && current.storageVersion === expected && ['AbortError','UnknownError','InvalidStateError'].includes(error.name))return save(session,{photo,deletePending,pending},1);
+      throw new Error(current?.id !== session.id || current.storageVersion !== expected?'Saved work changed in another window. Reopen this page before editing.':error.message);
+    }
     return next;
+  }
+  async function recover(){
+    for(const state of transactions)if(Date.now()-state.startedAt>30000)try{state.tx.abort();}catch{}
+    // A real readonly transaction validates cached connections; transaction() reopens closed ones.
+    await readAll('sessions');await readAll('snapshots',true);
+    return {pendingTransactions:transactions.size};
   }
   async function finishReplacement(sessionId){
     const rows=await readAll('sessions'),activeSession=rows.find(row=>row.id === 'active'),marker=rows.find(row=>row.id === 'retention');
@@ -108,5 +132,5 @@
     await transaction(['sessions','packages','photos','pending'],'readwrite',stores=>Object.values(stores).forEach(store=>store.clear()));
     localStorage.removeItem(JOURNAL);
   }
-  root.WeeklyStorage={DB,RECOVERY,JOURNAL,load:()=>retain(load),journal,save,replace:(...args)=>retain(()=>replace(...args)),archive:(...args)=>retain(()=>archive(...args)),verify,clear:()=>retain(clear),photos:()=>readAll('photos'),pending:()=>readAll('pending'),snapshots:()=>readAll('snapshots',true)};
+  root.WeeklyStorage={DB,RECOVERY,JOURNAL,load:()=>retain(load),journal,save,recover,replace:(...args)=>retain(()=>replace(...args)),archive:(...args)=>retain(()=>archive(...args)),verify,clear:()=>retain(clear),photos:()=>readAll('photos'),pending:()=>readAll('pending'),snapshots:()=>readAll('snapshots',true)};
 })(globalThis);

@@ -3,7 +3,7 @@
   'use strict';
   const R = typeof module === 'object' && module.exports ? require('./production-core.js') : root.ProductionCore;
   const copy = R.copy, text = R.text;
-  const VERSION = '1.3.4';
+  const VERSION = '1.4.0';
   // Reporting ownership is separate from the ECS gate/field workflow.
   // Add a group here when another team joins; gate definitions remain unchanged.
   const WORK_GROUPS = [
@@ -463,8 +463,24 @@
   }
   function photoPath(photo) {
     assert(/^[a-zA-Z0-9_-]+$/.test(photo.id),'Invalid PhotoID.');
+    if(photo.pathVersion === 2){
+      const stamp=new Date(photo.capturedAt);assert(Number.isFinite(stamp.getTime()),'Invalid photo capture time.');
+      const parts=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/London',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(stamp),part=name=>parts.find(value=>value.type === name).value;
+      const day=part('year')+'-'+part('month')+'-'+part('day');assert(photo.captureDate === day,'Photo capture date differs from UK capture time.');
+      const folder=R.photoFolder(photo).slice(0,-13),ecs=text(photo.ecsCode).replace(/[^a-zA-Z0-9_-]/g,'_').slice(0,80) || 'ECS',suffix=photo.fileSuffix || '';
+      assert(/^(?:_\d{3})?(?:_[0-9a-f]{6,8})?$/.test(suffix),'Invalid photo filename suffix.');
+      return folder+'/'+day+'/'+ecs+'_'+day.replace(/-/g,'')+'_'+part('hour')+part('minute')+part('second')+suffix+'.jpg';
+    }
     return R.photoFolder({building:photo.building,captureDate:photo.captureDate}) + '/' +
       photo.ecsCode.replace(/[^a-zA-Z0-9_-]/g,'_').slice(0,80) + '_' + photo.id + '.jpg';
+  }
+  function namePhoto(photo,existing=[]){
+    const named={...photo,pathVersion:2,fileSuffix:''},paths=new Set(existing.filter(value=>value.id !== photo.id).map(photoPath));
+    if(paths.has(photoPath(named))){
+      named.fileSuffix='_'+String(new Date(photo.capturedAt).getUTCMilliseconds()).padStart(3,'0');
+      if(paths.has(photoPath(named))){let hash=2166136261;for(const char of photo.id)hash=Math.imul(hash^char.charCodeAt(0),16777619)>>>0;named.fileSuffix+='_'+hash.toString(16).padStart(8,'0');}
+    }
+    assert(!paths.has(photoPath(named)),'Photo name collision. Retain this capture and retry.');return named;
   }
   function example() {
     const weekly = [
@@ -477,6 +493,6 @@
     return prepareRows(weekly,refs);
   }
   const api = {VERSION,R,copy,text,uid,newBatchId,stable,assert,date,config,gate,reportedPercent,prepareRows,pack,unpack,createSession,editorKey,recordFor,hasFields,essence,fingerprint,
-    WORK_GROUPS,groupLabel,workGroup,rowGroup,recorder,groupScopes,scopeDisciplines,workConflicts,saveWorkCheckin,isCheckin,noProgressBatchId,validateCheckin,saveBuildingCheckin,pendingCheckins,roomChanged,validateProgress,previousFor,previousForEdit,editorFor,editorDirty,setEditor,saveEditor,validateRecord,approvalFor,exported,pending,sign,visibleItems,search,addCandidate,candidateRemoval,removeCandidate,deleteEntry,restoreCheck,restoreEntry,hiddenPhotoIds,position,validateSession,photoPath,example,today:R.londonDate};
+    WORK_GROUPS,groupLabel,workGroup,rowGroup,recorder,groupScopes,scopeDisciplines,workConflicts,saveWorkCheckin,isCheckin,noProgressBatchId,validateCheckin,saveBuildingCheckin,pendingCheckins,roomChanged,validateProgress,previousFor,previousForEdit,editorFor,editorDirty,setEditor,saveEditor,validateRecord,approvalFor,exported,pending,sign,visibleItems,search,addCandidate,candidateRemoval,removeCandidate,deleteEntry,restoreCheck,restoreEntry,hiddenPhotoIds,position,validateSession,photoPath,namePhoto,example,today:R.londonDate};
   if (typeof module === 'object' && module.exports) module.exports = api; else root.WeeklyCore = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

@@ -14,7 +14,7 @@ Open the app online once and wait for **Offline ready**. Import a prepared weekl
 - Review the daily draft and record the supervisor's name. Changes after review require another review.
 - ECS at 90% remain editable. Correct a mistaken local selection or update its comments and photos; the reporting maximum remains 90%.
 - Delete a daily entry from its editor or draft. Undo is available in the collapsed Deleted entries section for the loaded week, including its saved photos. Weekly-plan cards remain available. Restored work requires fresh review.
-- Export the daily package, including its complete recovery backup and saved photo bytes. Previous downloads remain available for the active week.
+- Export the daily CSV and recovery data in one ZIP. Photos are prepared in a separate companion ZIP; the ready dialog offers both and keeps a direct photo-save link for retry. Previous downloads remain available for the active week.
 
 New daily batches use `DL-YYYYMMDD-HHmmss-xxxxxxxx`, with UK local date and time and an eight-character random suffix. Repeat downloads retain the original batch ID. Older saved batches keep their existing IDs.
 
@@ -25,6 +25,10 @@ Export history keeps each original package unchanged. Use Edit current entry to 
 ## Offline storage and recovery
 
 The app caches its required assets and saves records, unfinished editors and photo context on the device. Refreshing or reopening restores saved work. Available storage depends on the browser and device.
+
+Save both daily ZIPs outside the browser when photos exist. The companion includes earlier evidence and interrupted originals needed to restore the whole week. Select both files together when importing daily recovery; older full backups still use one file. New photos use `Building/YYYY-MM-DD/ECS_YYYYMMDD_HHmmss.jpg` with UK capture time and a short suffix only for a naming collision. Existing photos retain their original paths.
+
+Returning from a locked or suspended browser checks storage and reconnects an idle camera input while retaining the open editor, room and work date. Actual camera and download behaviour still depends on the device/browser.
 
 Save recovery ZIPs outside the browser. Clearing browser storage requires an external backup to recover work. Loading a different week shows a warning before removing the previous week's records, photos and local recovery copies.
 

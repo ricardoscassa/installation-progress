@@ -172,30 +172,44 @@
     });
     return payload;
   }
-  async function recoveryData(session,model,photos,pending=[]) {
+  async function recoveryData(session,model,photos,pending=[],options={}) {
     W.validateSession(session,model,new Set(photos.map(photo=>photo.id)));
-    const data={format:'weekly-progress-recovery',schema:1,createdAt:new Date().toISOString(),package:W.pack(model),session:W.copy(session),
+    for(const photo of [...photos,...pending])W.assert(photo.blob instanceof Blob && photo.blob.size === photo.size && await sha(photo.blob) === photo.sha256,'A recovery photo or interrupted original is missing or changed. Keep the local week and recover its evidence.');
+    const data={format:'weekly-progress-recovery',schema:options.pairId?2:1,createdAt:options.createdAt || new Date().toISOString(),...(options.pairId?{pairId:options.pairId}:{}),package:W.pack(model),session:W.copy(session),
       photos:photos.map(photoMetadata),pending:pending.map(photo=>({...photoMetadata(photo),path:'pending/'+photo.id+'.image'}))};
     const raw=W.stable(data);
-    const entries=[{name:'recovery.json',data:raw,compress:true},{name:'recovery-manifest.json',data:W.stable({schema:1,sha256:await sha(raw),photos:photos.length,pending:pending.length}),compress:true}];
-    photos.forEach(photo=>entries.push({name:W.photoPath(photo),data:photo.blob,crc:photo.crc32}));
-    pending.forEach(photo=>entries.push({name:'pending/'+photo.id+'.image',data:photo.blob,crc:photo.crc32}));
-    return {entries,data};
+    const hash=await sha(raw),entries=[{name:'recovery.json',data:raw,compress:true},{name:'recovery-manifest.json',data:W.stable({schema:data.schema,sha256:hash,photos:photos.length,pending:pending.length}),compress:true}];
+    if(!options.pairId){photos.forEach(photo=>entries.push({name:W.photoPath(photo),data:photo.blob,crc:photo.crc32}));pending.forEach(photo=>entries.push({name:'pending/'+photo.id+'.image',data:photo.blob,crc:photo.crc32}));}
+    return {entries,data,hash};
   }
-  async function readRecovery(file) {
+  async function readRecovery(file,companionFile=null) {
     const archive=await loadZip(file), raw=await readEntry(archive,'recovery.json',30*1024*1024);
     const manifest=await jsonEntry(archive,'recovery-manifest.json',50000), data=JSON.parse(decoder.decode(raw));
-    W.assert(manifest.schema === 1 && await sha(raw) === manifest.sha256 && data.format === 'weekly-progress-recovery' && data.schema === 1,'Recovery integrity check failed.');
+    W.assert([1,2].includes(manifest.schema) && await sha(raw) === manifest.sha256 && data.format === 'weekly-progress-recovery' && data.schema === manifest.schema,'Recovery integrity check failed.');
     W.assert(data.photos.length === manifest.photos && data.pending.length === manifest.pending,'Recovery photo count mismatch.');
+    let evidence=archive;
+    if(data.schema === 2 && (data.photos.length || data.pending.length)){
+      if(!companionFile){const error=new Error('This data backup needs its companion photo ZIP for full restoration. Select both files together.');error.code='PHOTO_COMPANION_REQUIRED';throw error;}
+      evidence=await loadZip(companionFile);
+      const pair=await jsonEntry(archive,'pair-manifest.json',50000),other=await jsonEntry(evidence,'pair-manifest.json',50000),filesRaw=await readEntry(evidence,'recovery-files.json',10*1024*1024),files=JSON.parse(decoder.decode(filesRaw));
+      W.assert(W.stable(pair) === W.stable(other) && pair.format === 'weekly-progress-pair' && pair.schema === 1 && pair.id === data.pairId && pair.recoverySha256 === manifest.sha256 && pair.filesSha256 === await sha(filesRaw),'These backup files do not belong to the same recovery snapshot.');
+      W.assert(files.format === 'weekly-progress-recovery-files' && files.pairId === data.pairId && files.recoverySha256 === manifest.sha256 && W.stable(files.photos) === W.stable(data.photos) && W.stable(files.pending) === W.stable(data.pending),'Companion recovery file manifest differs from the data backup.');
+      W.assert(await sha(await readEntry(evidence,'photo-manifest.json',10*1024*1024)) === pair.evidenceSha256,'Companion evidence manifest integrity check failed.');
+    }
     const model=W.unpack(data.package), photos=[],pending=[],paths=new Set(),ids=new Set();
     for(const [metadata,destination] of [...data.photos.map(photo=>[photo,photos]),...data.pending.map(photo=>[photo,pending])]) {
       W.assert(!ids.has(metadata.id) && !paths.has(metadata.path),'Duplicate recovery photo.');ids.add(metadata.id);paths.add(metadata.path);
-      const rawPhoto=await readEntry(archive,metadata.path,25*1024*1024);
+      const rawPhoto=await readEntry(evidence,metadata.path,25*1024*1024);
       W.assert(await sha(rawPhoto) === metadata.sha256 && rawPhoto.length === metadata.size,'Recovery photo integrity check failed.');
       destination.push({...metadata,blob:new Blob([rawPhoto],{type:metadata.type || 'image/jpeg'}),crc32:crc32(rawPhoto)});
     }
     W.validateSession(data.session,model,new Set(photos.map(photo=>photo.id)));
     return {session:data.session,model,photos,pending};
+  }
+  async function readRecoveryPair(files){
+    W.assert(files.length>0 && files.length<=2,'Choose the data ZIP and its companion photo ZIP, or one legacy full backup.');
+    if(files.length === 1)return readRecovery(files[0]);
+    const first=await loadZip(files[0]);return first.file('recovery.json')?readRecovery(files[0],files[1]):readRecovery(files[1],files[0]);
   }
   async function dailyZip(session,model,records,photos,pending=[]) {
     const rows=[];
@@ -212,12 +226,18 @@
       await validatePayload(row.payload,row.hash);
       for(const metadata of row.payload.photos){const photo=photos.find(value=>value.id === metadata.id);W.assert(photo && photo.size === metadata.size && await sha(photo.blob) === metadata.sha256,'The original export photo bytes are missing or changed. Restore a recovery backup.');}
     }
-    const recovery=await recoveryData(future,model,photos,pending);
     const csvText=csv(rows), dayPhotos=[...new Map(rows.flatMap(row=>row.payload.photos).map(photo=>[photo.id,photo])).values()];
+    // Recovery covers the whole week, including deleted/history evidence and unfinished originals.
+    log.pairId ||= log.id;
+    const recovery=await recoveryData(future,model,photos,pending,{pairId:log.pairId,createdAt:log.createdAt});
+    const evidence=W.stable({format:'weekly-progress-photos',schema:1,photos:dayPhotos}),files=W.stable({format:'weekly-progress-recovery-files',schema:1,pairId:log.pairId,recoverySha256:recovery.hash,photos:recovery.data.photos,pending:recovery.data.pending});
+    const pair={format:'weekly-progress-pair',schema:1,id:log.pairId,exportId:log.id,date:log.date,recoverySha256:recovery.hash,filesSha256:await sha(files),evidenceSha256:await sha(evidence),csvSha256:await sha(csvText),photoCount:photos.length,pendingCount:pending.length},pairEntry={name:'pair-manifest.json',data:W.stable(pair),compress:true};
     const entries=[...recovery.entries,{name:'daily.csv',data:csvText,compress:true},
       {name:'export-manifest.json',data:W.stable({format:'weekly-progress-export',schema:1,id:log.id,date:log.date,csvSha256:await sha(csvText),records:rows.map(row=>({id:row.payload.record.id,hash:row.hash}))}),compress:true},
-      {name:'photo-manifest.json',data:W.stable({format:'weekly-progress-photos',schema:1,photos:dayPhotos}),compress:true}];
-    return {blob:await zip(entries),log,csv:csvText,future};
+      pairEntry];
+    const photoEntries=[pairEntry,{name:'recovery-files.json',data:files,compress:true},{name:'photo-manifest.json',data:evidence,compress:true},
+      ...photos.map(photo=>({name:W.photoPath(photo),data:photo.blob,crc:photo.crc32})),...pending.map(photo=>({name:'pending/'+photo.id+'.image',data:photo.blob,crc:photo.crc32}))];
+    return {blob:await zip(entries),photoBlob:photos.length || pending.length?await zip(photoEntries):null,pair,log,csv:csvText,future};
   }
   async function repeatDailyZip(session,model,id,photos,pending=[]) {
     const future=W.copy(session),log=future.exports.find(entry=>entry.id === id && entry.kind === 'daily');
@@ -253,6 +273,6 @@
     return files;
   }
   const api={bytes,sha,crc32,safePath,zip,loadZip,readEntry,jsonEntry,weeklyZip,readWeekly,HEADERS,FIELD_IDS,csvObject,csv,parseCsv,
-    photoMetadata,payloadFor,validatePayload,recoveryData,readRecovery,dailyZip,repeatDailyZip,readDaily,photoZip,readPhotos};
+    photoMetadata,payloadFor,validatePayload,recoveryData,readRecovery,readRecoveryPair,dailyZip,repeatDailyZip,readDaily,photoZip,readPhotos};
   if(typeof module === 'object' && module.exports) module.exports=api; else root.WeeklyFiles=api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
