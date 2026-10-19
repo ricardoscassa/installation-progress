@@ -3,7 +3,7 @@
   'use strict';
   const R = typeof module === 'object' && module.exports ? require('./production-core.js') : root.ProductionCore;
   const copy = R.copy, text = R.text;
-  const VERSION = '1.4.0';
+  const VERSION = '1.4.1';
   // Reporting ownership is separate from the ECS gate/field workflow.
   // Add a group here when another team joins; gate definitions remain unchanged.
   const WORK_GROUPS = [
