@@ -3,7 +3,7 @@
   'use strict';
   const R = typeof module === 'object' && module.exports ? require('./production-core.js') : root.ProductionCore;
   const copy = R.copy, text = R.text;
-  const VERSION = '1.3.1';
+  const VERSION = '1.3.2';
   // Reporting ownership is separate from the ECS gate/field workflow.
   // Add a group here when another team joins; gate definitions remain unchanged.
   const WORK_GROUPS = [
@@ -160,7 +160,7 @@
     assert(text(operator.name),'Enter the person recording this week.');
     return {schema:'weekly-progress-session/1',id:uid('WP-'),packageId:model.sessionId,weekKey:model.sourceWeekKey || model.reportingWeek,
       operator:{name:text(operator.name),email:text(operator.email)},createdAt:now,updatedAt:now,storageVersion:0,journalGeneration:0,
-      addedIds:[],records:[],checkins:[],editors:{},approvals:[],exports:[],batches:{},
+      addedIds:[],records:[],checkins:[],editors:{},approvals:[],exports:[],batches:{},deletedEntries:[],
       ui:{screen:'home',room:model.items[0].roomLabel,expanded:'',editDate:'',scroll:0},pendingCapture:null};
   }
   const editorKey = (day,itemId) => R.key(day,itemId);
@@ -233,12 +233,19 @@
     if (!fields.noProgress && previous?.percent > 90) errors.push('The imported position is above 90%; keep it unchanged and record No Progress with a reason.');
     return {...value,errors:[...new Set(errors)],ready:errors.length === 0};
   }
-  function previousFor(session,model,item,day,batchId='') {
+  function previousFor(session,model,item,day,batchId='',fields=null) {
     if(batchId){
       const exported=session.exports.filter(entry=>entry.kind === 'daily').flatMap(entry=>entry.records || []).map(row=>row.payload?.record).filter(record=>record?.itemId === item.id && record.date === day);
       const first=exported.findIndex(record=>record.batchId === batchId),earlier=first<0?exported:exported.slice(0,first);
       const prior=[...earlier].reverse().find(record=>record.batchId !== batchId && !record.fields.noProgress);
-      if(prior){const v=validateProgress(item,prior.fields,prior.config,prior.previous);if(v.ready)return {percent:v.reportedPercent,gate:prior.fields.gate,recordId:prior.id,revision:prior.revision};}
+      if(prior){
+        const v=validateProgress(item,prior.fields,prior.config,prior.previous);
+        const proposed=fields || session.records.find(record=>record.itemId === item.id && record.date === day && record.batchId === batchId)?.fields;
+        const rule=R.workflow(item).rules.find(rule=>rule.code === proposed?.gate),percent=rule?.policy === 'Fixed'?rule.percent:R.number(proposed?.percent);
+        // A correction replaces this day's local observation; it is not new progress from a mistaken export.
+        if(v.ready && !proposed?.noProgress && Number.isFinite(percent) && percent < v.reportedPercent)return copy(earlier.find(record=>!record.fields.noProgress)?.previous || prior.previous);
+        if(v.ready)return {percent:v.reportedPercent,gate:prior.fields.gate,recordId:prior.id,revision:prior.revision};
+      }
     }
     const records = session.records.filter(record=>record.itemId === item.id && record.date < day).sort((a,b)=>b.date.localeCompare(a.date));
     for (const record of records) {
@@ -265,6 +272,10 @@
     session.updatedAt = now;
   }
   const batchSealed=(session,batchId)=>session.exports.some(entry=>entry.kind === 'daily' && entry.records?.some(row=>row.payload?.record?.batchId === batchId));
+  function previousForEdit(session,model,item,editor){
+    const record=recordFor(session,editor.date,item.id);
+    return record?previousFor(session,model,item,editor.date,batchSealed(session,record.batchId)?'next-edit':record.batchId,editor.fields):editor.previous;
+  }
   function batchFor(session,item,day) {
     const key = R.key(session.weekKey,day,item.building,session.operator.email || session.operator.name);
     if (!session.batches[key] || batchSealed(session,session.batches[key])) session.batches[key] = uid('DL-');
@@ -277,7 +288,7 @@
     const revision = (existing?.revision || 0) + 1;
     const batchId=existing && !batchSealed(session,existing.batchId)?existing.batchId:batchFor(session,item,editor.date);
     const record = {id:existing?.id || uid('WR-'),revision,itemId:item.id,batchId,
-      date:date(editor.date),weekKey:session.weekKey,fields:copy(editor.fields),previous:copy(existing && batchId !== existing.batchId?previousFor(session,model,item,editor.date,batchId):editor.previous),
+      date:date(editor.date),weekKey:session.weekKey,fields:copy(editor.fields),previous:copy(existing?previousFor(session,model,item,editor.date,batchId,editor.fields):editor.previous),
       photos:copy(editor.photos),operator:copy(existing?.operator || session.operator),config:copy(session.config || model.config),ruleVersion:R.gates.version,
       createdAt:existing?.createdAt || now,savedAt:now,history:copy(existing?.history || [])};
     const resolved = R.workflow(item), rule = resolved.rules.find(rule=>rule.code === record.fields.gate);
@@ -292,7 +303,7 @@
     const item = model.items.find(item=>item.id === record.itemId);
     if (!item) return {ready:false,errors:['Source ECS is missing from this package.']};
     const v = validateProgress(item,record.fields,record.config,record.previous);
-    const currentPrevious = previousFor(session,model,item,record.date,record.batchId);
+    const currentPrevious = previousFor(session,model,item,record.date,record.batchId,record.fields);
     if (stable(currentPrevious) !== stable(record.previous)) v.errors.push('An earlier day changed. Reopen and review the previous progress before saving this record again.');
     const editor = session.editors[editorKey(record.date,record.itemId)];
     if (editor && editorDirty(session,editor)) v.errors.push('This record has unfinished edits. Save them before review or export.');
@@ -300,7 +311,7 @@
     return v;
   }
   function approvalFor(session,record) {
-    return [...session.approvals].reverse().find(approval=>approval.records.some(value=>value.id === record.id && value.revision === record.revision && value.fingerprint === fingerprint(record))) || null;
+    return [...session.approvals].reverse().find(approval=>!approval.invalidatedAt && approval.records.some(value=>value.id === record.id && value.revision === record.revision && value.fingerprint === fingerprint(record))) || null;
   }
   function exported(session,record) {
     return session.exports.some(entry=>entry.kind === 'daily' && entry.status === 'download-started' && entry.records.some(value=>value.id === record.id && value.revision === record.revision && value.fingerprint === fingerprint(record)));
@@ -345,6 +356,60 @@
     Object.entries(session.editors).forEach(([key,editor])=>{if(editor.itemId === id)delete session.editors[key];});
     if(session.ui.expanded === id){session.ui.expanded='';session.ui.editDate='';}
   }
+  function deleteEntry(session,model,{recordId='',itemId='',day=''},now=new Date().toISOString()) {
+    const record=recordId?[...session.records,...(session.checkins || [])].find(value=>value.id === recordId):recordFor(session,day,itemId);
+    assert(!recordId || record,'This entry is no longer in current work.');
+    const checkin=isCheckin(record);day=record?.date || date(day);itemId=record?.itemId || itemId;
+    const key=checkin?'':editorKey(day,itemId),editor=key?session.editors[key]:null;
+    assert(record || editor && (hasFields(editor.fields) || editor.photos.length),'There is no daily entry to delete.');
+    assert(checkin || model.items.some(item=>item.id === itemId),'The source ECS is missing.');
+    assert(!session.pendingCapture || session.pendingCapture.itemId !== itemId || (session.pendingCapture.workDate || session.pendingCapture.editor?.date) !== day,'Finish the interrupted photo before deleting this entry.');
+    const entry={id:uid('DEL-'),kind:checkin?'checkin':'ecs',date:day,itemId:checkin?'':itemId,deletedAt:now,record:record?copy(record):null,editor:editor?copy(editor):null};
+    session.deletedEntries ||= [];session.deletedEntries.push(entry);
+    if(record){
+      session.records=session.records.filter(value=>value.id !== record.id);
+      session.checkins=(session.checkins || []).filter(value=>value.id !== record.id);
+      session.approvals.forEach(approval=>{if(!approval.invalidatedAt && approval.records.some(value=>value.id === record.id)){approval.invalidatedAt=now;approval.invalidationReason='A reviewed daily entry was deleted.';}});
+      if(session.pendingCheckin?.id === record.id)delete session.pendingCheckin;
+    }
+    if(key)delete session.editors[key];
+    if(session.ui.expanded === itemId){session.ui.expanded='';session.ui.editDate='';}
+    session.updatedAt=now;return entry;
+  }
+  function restoreCheck(session,entry){
+    if(!entry || entry.restoredAt)return {allowed:false,reason:'This deleted entry has already been restored.'};
+    if(entry.kind === 'checkin'){
+      const record=entry.record,conflict=(session.checkins || []).some(value=>value.date === record.date && value.building === record.building && (value.groupId || '') === (record.groupId || '') && (value.supervisorKey || '') === (record.supervisorKey || ''));
+      return {allowed:!conflict,reason:conflict?'A current check-in already covers this person and scope. Keep it or delete it before restoring.':''};
+    }
+    const current=recordFor(session,entry.date,entry.itemId),editor=session.editors[editorKey(entry.date,entry.itemId)],capture=session.pendingCapture;
+    const conflict=current || editor && (hasFields(editor.fields) || editor.photos.length) || capture?.itemId === entry.itemId && (capture.workDate || capture.editor?.date) === entry.date;
+    return {allowed:!conflict,reason:conflict?'There is newer work for this ECS and day. Keep it or delete it before restoring.':''};
+  }
+  function restoreEntry(session,model,id,now=new Date().toISOString()){
+    const entry=(session.deletedEntries || []).find(value=>value.id === id),check=restoreCheck(session,entry);assert(check.allowed,check.reason);
+    let record=entry.record?copy(entry.record):null;
+    if(record){
+      record.revision+=1;record.history ||= [];
+      if(isCheckin(record)){
+        record.history.push({revision:entry.record.revision,name:entry.record.supervisorName,recordedAt:entry.record.recordedAt});record.recordedAt=now;
+        if(batchSealed(session,record.batchId)){record.batchGeneration=uid('NP-');record.batchId=noProgressBatchId({weekKey:record.weekKey,operator:record.operator},record.building,record.date,record.groupId || '',record.supervisorKey || '',record.batchGeneration);}
+        session.checkins.push(record);
+      }else{
+        record.history.push({...copy(entry.record),history:undefined});record.savedAt=now;
+        if(batchSealed(session,record.batchId)){record.batchId=batchFor(session,model.items.find(item=>item.id === record.itemId),record.date);record.previous=previousFor(session,model,model.items.find(item=>item.id === record.itemId),record.date,record.batchId,record.fields);}
+        session.records.push(record);
+      }
+    }
+    if(entry.editor){const editor=copy(entry.editor);editor.baseRevision=record?.revision || 0;editor.updatedAt=now;if(record)editor.previous=copy(record.previous);session.editors[editorKey(entry.date,entry.itemId)]=editor;}
+    if(entry.kind === 'ecs'){const item=model.items.find(value=>value.id === entry.itemId);if(item.origin !== 'Weekly Plan' && !session.addedIds.includes(item.id))session.addedIds.push(item.id);}
+    entry.restoredAt=now;session.updatedAt=now;return record || entry.editor;
+  }
+  function hiddenPhotoIds(session){
+    const deleted=new Set((session.deletedEntries || []).filter(entry=>!entry.restoredAt).flatMap(entry=>[...(entry.record?.photos || []),...(entry.editor?.photos || [])]));
+    for(const record of [...session.records,...Object.values(session.editors),...session.exports.flatMap(entry=>(entry.records || []).map(row=>row.payload?.record).filter(Boolean))])for(const id of record.photos || [])deleted.delete(id);
+    return deleted;
+  }
   function position(session,model,item,day) {
     const records = session.records.filter(record=>record.itemId === item.id && record.date <= day).sort((a,b)=>b.date.localeCompare(a.date));
     const current = records.find(record=>validateProgress(item,record.fields,record.config,record.previous).ready);
@@ -374,6 +439,18 @@
       assert(key === editorKey(date(editor.date),editor.itemId) && allItems.has(editor.itemId) && Array.isArray(editor.photos),'Invalid unfinished editor.');
       if (photoIds) assert(editor.photos.every(id=>photoIds.has(id)),'An unfinished editor is missing photo bytes.');
     }
+    session.deletedEntries ||= [];
+    assert(Array.isArray(session.deletedEntries) && session.deletedEntries.length<=10000,'Invalid deleted-entry history.');
+    const deletedIds=new Set();
+    for(const entry of session.deletedEntries){
+      assert(entry.id && !deletedIds.has(entry.id) && ['ecs','checkin'].includes(entry.kind) && date(entry.date) && Number.isFinite(Date.parse(entry.deletedAt)) && (!entry.restoredAt || Number.isFinite(Date.parse(entry.restoredAt))),'Invalid deleted entry.');deletedIds.add(entry.id);
+      assert(entry.record || entry.editor,'Deleted entry has no recoverable content.');
+      if(entry.kind === 'checkin'){validateCheckin(entry.record);assert(entry.record.date === entry.date && entry.record.weekKey === session.weekKey && !entry.editor,'Invalid deleted check-in.');}
+      else{
+        assert(allItems.has(entry.itemId) && (!entry.record || entry.record.itemId === entry.itemId && entry.record.date === entry.date && entry.record.weekKey === session.weekKey) && (!entry.editor || entry.editor.itemId === entry.itemId && entry.editor.date === entry.date),'Invalid deleted ECS context.');
+        for(const source of [entry.record,entry.editor].filter(Boolean))assert(Array.isArray(source.photos) && (!photoIds || source.photos.every(id=>photoIds.has(id))),'Deleted entry is missing recoverable photo bytes.');
+      }
+    }
     if(session.pendingCheckin){const form=session.pendingCheckin;date(form.date);assert(typeof form.name === 'string' && form.name.length<=255 && typeof form.id === 'string' && (!form.id || session.checkins.some(record=>record.id === form.id && record.building === form.building && record.groupId === form.groupId && record.date === form.date)) && groupScopes(model).some(scope=>scope.building === form.building && scope.groupId === form.groupId),'Invalid unfinished no-progress entry.');}
     return session;
   }
@@ -393,6 +470,6 @@
     return prepareRows(weekly,refs);
   }
   const api = {VERSION,R,copy,text,uid,stable,assert,date,config,gate,reportedPercent,prepareRows,pack,unpack,createSession,editorKey,recordFor,hasFields,essence,fingerprint,
-    WORK_GROUPS,groupLabel,workGroup,rowGroup,recorder,groupScopes,scopeDisciplines,workConflicts,saveWorkCheckin,isCheckin,noProgressBatchId,validateCheckin,saveBuildingCheckin,pendingCheckins,roomChanged,validateProgress,previousFor,editorFor,editorDirty,setEditor,saveEditor,validateRecord,approvalFor,exported,pending,sign,visibleItems,search,addCandidate,candidateRemoval,removeCandidate,position,validateSession,photoPath,example,today:R.londonDate};
+    WORK_GROUPS,groupLabel,workGroup,rowGroup,recorder,groupScopes,scopeDisciplines,workConflicts,saveWorkCheckin,isCheckin,noProgressBatchId,validateCheckin,saveBuildingCheckin,pendingCheckins,roomChanged,validateProgress,previousFor,previousForEdit,editorFor,editorDirty,setEditor,saveEditor,validateRecord,approvalFor,exported,pending,sign,visibleItems,search,addCandidate,candidateRemoval,removeCandidate,deleteEntry,restoreCheck,restoreEntry,hiddenPhotoIds,position,validateSession,photoPath,example,today:R.londonDate};
   if (typeof module === 'object' && module.exports) module.exports = api; else root.WeeklyCore = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

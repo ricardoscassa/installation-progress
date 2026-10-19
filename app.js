@@ -202,7 +202,7 @@
     const items=W.visibleItems(session,model,room).sort((a,b)=>Number(W.position(session,model,b,today).green)-Number(W.position(session,model,a,today).green)||a.ecsCode.localeCompare(b.ecsCode,undefined,{numeric:true}));
     items.forEach(item=>list.append(renderCard(item,day)));content.append(list);
     const add=button('Add ECS',async()=>{await saveOpen();searchOpen=!searchOpen;session.ui.expanded='';await persist();renderRooms();if(searchOpen)$('candidate-query')?.focus();},'add-button','plus');add.id='add-ecs';content.append(add);
-    if(searchOpen)renderSearch(room);content.scrollTop=scroll;
+    if(searchOpen)renderSearch(room);deletedEntries(content,day,room);content.scrollTop=scroll;
   }
   const roomName=key=>model.items.find(item=>item.roomLabel === key)?.room || key;
   const roomBuilding=key=>model.items.find(item=>item.roomLabel === key)?.building || '';
@@ -232,7 +232,7 @@
     if(photoCount){meta.append(icon('camera'),h('span','',photoCount));}
     meta.append(icon('chevron'));toggle.append(line,meta);
     const validation=current?W.validateRecord(session,model,current):null;
-    const label=pos.ceiling?'90% field ceiling reached · stays green this week':pos.record?.date === today?'Recorded today · '+pos.gate:current?'Draft · requirements need attention':'Latest: '+(pos.gate || 'Reference needed');
+    const label=pos.ceiling?'90% or above · open to edit · stays green this week':pos.record?.date === today?'Recorded today · '+pos.gate:current?'Draft · requirements need attention':'Latest: '+(pos.gate || 'Reference needed');
     toggle.append(h('div',pos.green?'ecs-result':'subtle',label));card.append(toggle);
     if(expanded)card.append(renderEditor(item,day));
     return card;
@@ -247,7 +247,7 @@
       validation.append(v.ready?h('p','green-text','Progress fields ready. Photos are optional.'):validationBox(v.errors));
     };
     const saveField=(name,value)=>{
-      editor.fields[name]=value;W.setEditor(session,editor);readiness();
+      editor.fields[name]=value;editor.previous=W.copy(W.previousForEdit(session,model,item,editor));W.setEditor(session,editor);readiness();
       persistEditor();updateRoomFlags();
     };
     body.append(h('h3','','Gate status'));
@@ -256,9 +256,10 @@
     const chooseGate=async rule=>{
         editor.fields.gate=rule.code;editor.fields.noProgress=false;
         if(rule.policy === 'Fixed')editor.fields.percent=rule.percent;
+        editor.previous=W.copy(W.previousForEdit(session,model,item,editor));
         W.setEditor(session,editor);await persist();body.replaceWith(renderEditor(item,day));updateRoomFlags();
     };
-    const unavailable=rule=>editor.previous.percent > 90 || (rule.policy === 'Fixed' && rule.percent < editor.previous.percent);
+    const unavailable=()=>editor.previous.percent > 90;
     if(eligible.length>4){
       const picker=select([{value:'',label:'Select gate status'},...eligible.map(rule=>({value:rule.code,label:gateLabel(rule.code)+' · '+(rule.policy === 'Fixed'?rule.percent+'%':'0–90%')}))],editor.fields.gate || '');
       picker.dataset.gateSelect='true';picker.setAttribute('aria-label','Gate status');
@@ -306,6 +307,9 @@
       W.setEditor(session,editor);W.saveEditor(session,model,item,editor);session.ui.expanded='';session.ui.editDate='';await persist();renderRooms();notice('Daily record saved. Review it in Draft.');scheduleCheckpoint();
     },'button primary'));body.append(actions,h('p','subtle','Edits autosave on this device. Switching cards saves the daily draft.'));
     if(editor.photos.length)body.append(photoGrid(editor.photos));
+    const saved=W.recordFor(session,day,item.id);
+    if(saved || W.hasFields(editor.fields) || editor.photos.length){const remove=button(saved?'Delete daily entry':'Discard entry',()=>confirmDelete({itemId:item.id,day}),'link-button danger');remove.dataset.deleteItem=item.id;body.append(remove);}
+    if(wasExported(saved || {itemId:item.id,date:day}))body.append(h('p','subtle','Earlier downloads keep their original values. If those values were uploaded, correct them manually in the source lists.'));
     if(item.origin !== 'Weekly Plan'){
       const removal=W.candidateRemoval(session,model,item.id),remove=button('Remove added ECS',()=>removeAdded(item),'link-button danger');
       remove.dataset.removeEcs=item.id;remove.disabled=!removal.allowed;body.append(remove);
@@ -317,6 +321,35 @@
     const removal=W.candidateRemoval(session,model,item.id);W.assert(removal.allowed,removal.reason);
     const body=dialog('Remove added ECS?');body.append(h('p','',item.ecsCode+' will leave this room and remain available in Add ECS search. Any unfinished values will be kept in recovery.'));
     body.append(button('Remove from room',async()=>{await checkpoint('Before removing added ECS');W.removeCandidate(session,model,item.id);await persist();closeDialog();renderRooms();notice('Added ECS removed. It is still available in search.');},'button danger block'));
+  }
+  function wasExported(record){return session.exports.some(entry=>entry.kind === 'daily' && entry.records?.some(row=>row.payload?.record?.id === record.id || record.itemId && row.payload?.record?.itemId === record.itemId && row.payload?.record?.date === record.date));}
+  async function editRecord(record){
+    await saveOpen();const current=W.recordFor(session,record.date,record.itemId);W.assert(current,'This entry was deleted. Restore it from Deleted entries before editing.');
+    const item=sourceItem(current.itemId);session.ui.screen='rooms';session.ui.room=item.roomLabel;session.ui.expanded=item.id;session.ui.editDate=current.date;await persist();closeDialog();render();
+  }
+  async function confirmDelete(context){
+    await flush();const record=context.recordId?[...session.records,...(session.checkins || [])].find(record=>record.id === context.recordId):W.recordFor(session,context.day,context.itemId);
+    const item=sourceItem(record?.itemId || context.itemId),day=record?.date || context.day;
+    W.assert(!item || !pendingPhotos.some(photo=>photo.itemId === item.id && photo.workDate === day),'Finish the interrupted photo before deleting this entry.');
+    const body=dialog('Delete daily entry?'),label=W.isCheckin(record)?record.building+' · '+W.groupLabel(record.groupId)+' · '+record.supervisorName:item.ecsCode+' · room '+item.room;
+    body.append(h('p','',label+' · '+dayLabel(day)),h('p','','This removes the entry from current work. Undo keeps its values and photos available for this week. Loaded weekly-plan ECS stay in the room.'));
+    if(record && wasExported(record))body.append(h('p','note','Earlier downloads keep this entry. Deleting here does not cancel anything already uploaded; corrections there are manual.'));
+    body.append(button('Delete entry',async()=>{await checkpoint('Before deleting a daily entry');W.deleteEntry(session,model,context);await persist();closeDialog();render();notice('Entry deleted. Use Undo in Deleted entries to restore it.');scheduleCheckpoint();},'button danger block'));
+    body.append(button('Keep entry',closeDialog,'button block'));
+  }
+  function deletedEntries(parent,day,room=''){
+    const entries=(session.deletedEntries || []).filter(entry=>entry.date === day && !entry.restoredAt && (!room || sourceItem(entry.itemId)?.roomLabel === room));
+    if(!entries.length)return;
+    const group=h('details','batch deleted-entries');group.append(h('summary','','Deleted entries · '+entries.length),h('p','subtle','Undo is available while this week is loaded. Another week clears these entries and their local recovery.'));
+    entries.slice().reverse().forEach(entry=>{
+      const record=entry.record,item=sourceItem(entry.itemId),box=h('details','draft-record');box.dataset.deletedEntry=entry.id;
+      box.append(h('summary','',entry.kind === 'checkin'?record.building+' · '+W.groupLabel(record.groupId)+' · No progress':item.ecsCode+' · room '+item.room),h('p','subtle','Deleted '+time(entry.deletedAt)));
+      if(record && item)box.append(h('p','',summary(record,item)));
+      if(entry.kind === 'checkin')box.append(h('p','',record.supervisorName));
+      const photoIds=[...new Set([...(record?.photos || []),...(entry.editor?.photos || [])])];if(photoIds.length)box.append(photoGrid(photoIds));
+      const check=W.restoreCheck(session,entry),undo=button('Undo deletion',async()=>{W.restoreEntry(session,model,entry.id);await persist();render();notice('Entry restored. Review it again before exporting.');scheduleCheckpoint();},'button block');undo.dataset.restoreEntry=entry.id;undo.disabled=!check.allowed;box.append(undo);
+      if(!check.allowed)box.append(h('p','subtle',check.reason));group.append(box);
+    });parent.append(group);
   }
   function renderSearch(room){
     const box=h('section','search-container');box.id='candidate-search';
@@ -342,14 +375,16 @@
   function recordDetails(record,{history=false}={}){
     if(W.isCheckin(record)){
       const details=h('details','draft-record'),sum=h('summary'),row=h('div','spread');row.append(h('span','',record.building+' · '+W.groupLabel(record.groupId)+' · No progress'),icon('chevron'));sum.append(row,h('span','checkin-owner',record.supervisorName));details.append(sum,h('p','subtle',dayLabel(record.date)+' · 0 ECS items'),h('p','','Supervisor / superintendent: '+record.supervisorName),h('p','subtle','Recorded by '+record.operator.name+' · '+time(record.recordedAt)));
-      if(!history && record.kind === 'work-group-no-progress')details.append(button('Edit check-in',()=>workCheckin(record),'link-button'));return details;
+      const current=(session.checkins || []).find(value=>value.id === record.id);
+      if(current){const actions=h('div','row');if(record.kind === 'work-group-no-progress')actions.append(button(history?'Edit current check-in':'Edit check-in',()=>workCheckin(current),'link-button'));const remove=button('Delete daily entry',()=>confirmDelete({recordId:current.id}),'link-button danger');remove.dataset.deleteRecord=current.id;actions.append(remove);details.append(actions);}
+      return details;
     }
     const item=sourceItem(record.itemId),details=h('details','draft-record'),sum=h('summary'),top=h('div','spread');
     const value=W.validateProgress(item,record.fields,record.config,record.previous),progress=record.fields.noProgress?'No progress':(record.previous.percent ?? '—')+'% → '+(value.reportedPercent ?? '—')+'%';
     top.append(h('strong','',item.ecsCode),h('span','review-progress',progress));
     if(record.photos.length){const flag=icon('camera');flag.setAttribute('aria-hidden','false');flag.setAttribute('role','img');flag.setAttribute('aria-label','Photo attached');top.append(flag);}
     top.append(icon('chevron'));sum.append(top);details.append(sum);
-    const status=W.exported(session,record)?'Exported':W.approvalFor(session,record)?'Reviewed':'Awaiting review';details.append(pill(status,status === 'Awaiting review'?'':'good'),h('p','subtle','Revision '+record.revision));
+    const status=history?'Export snapshot':W.exported(session,record)?'Exported':W.approvalFor(session,record)?'Reviewed':'Awaiting review';details.append(pill(status,status === 'Awaiting review'?'':'good'),h('p','subtle','Revision '+record.revision));
     const kv=h('dl','kv');
     const values=[['Building / room',item.roomLabel],['Commodity',item.commodity],['Work origin',item.origin],['Work date',record.date],['Gate',record.fields.noProgress?record.previous.gate:record.fields.gate],['Previous percent',record.previous.percent ?? '—'],['New percent',record.fields.noProgress?'Unchanged':W.validateProgress(item,record.fields,record.config,record.previous).reportedPercent ?? '—']];
     const definitions=R.fieldsFor(item,record.config);
@@ -358,13 +393,18 @@
     values.forEach(([label,value])=>kv.append(h('dt','',label),h('dd','',value ?? '')));details.append(kv);
     if(record.photos.length)details.append(photoGrid(record.photos));
     const approvals=session.approvals.filter(approval=>approval.records.some(value=>value.id === record.id));
-    approvals.forEach(approval=>details.append(h('p','subtle','Reviewed by '+approval.name+' · '+time(approval.signedAt)+' · revision '+approval.records.find(value=>value.id === record.id).revision)));
-    if(!history)details.append(button('Edit record',async()=>{session.ui.screen='rooms';session.ui.room=item.roomLabel;session.ui.expanded=item.id;session.ui.editDate=record.date;await persist();render();},'link-button'));
+    approvals.forEach(approval=>{
+      const label=(approval.invalidatedAt?'Previous review by ':'Reviewed by ')+approval.name+' · '+time(approval.signedAt)+' · revision '+approval.records.find(value=>value.id === record.id).revision+(approval.invalidatedAt?' · review required again':'');
+      details.append(h('p','subtle',label));
+    });
+    const current=W.recordFor(session,record.date,item.id);
+    if(current){const actions=h('div','row');actions.append(button(history?'Edit current entry':'Edit record',()=>editRecord(current),'link-button'));const remove=button('Delete daily entry',()=>confirmDelete({recordId:current.id}),'link-button danger');remove.dataset.deleteRecord=current.id;actions.append(remove);details.append(actions);}
+    else if(history)details.append(h('p','subtle','Removed from current work. Undo is available in Deleted entries.'));
     return details;
   }
   function renderDraft(){
     resetContent();heading('Draft & history','DAILY WORK','Today opens first. Earlier days and exported snapshots stay available.');
-    const days=[...new Set([today,...session.records.map(record=>record.date),...(session.checkins || []).map(record=>record.date),...Object.values(session.editors).map(editor=>editor.date),...session.exports.map(entry=>entry.date).filter(Boolean)])].sort().reverse();
+    const days=[...new Set([today,...session.records.map(record=>record.date),...(session.checkins || []).map(record=>record.date),...(session.deletedEntries || []).filter(entry=>!entry.restoredAt).map(entry=>entry.date),...Object.values(session.editors).map(editor=>editor.date),...session.exports.map(entry=>entry.date).filter(Boolean)])].sort().reverse();
     days.forEach(day=>{
       const batch=h('details','batch');batch.open=day === today;
       const editors=Object.values(session.editors).filter(editor=>editor.date === day && W.editorDirty(session,editor)),editingIds=new Set(editors.map(editor=>editor.itemId));
@@ -377,6 +417,7 @@
       editors.forEach(editor=>{
         const item=sourceItem(editor.itemId);batch.append(h('p','subtle',item.roomLabel+' · '+item.ecsCode+' · unfinished edits'));
         batch.append(button('Continue unfinished record',async()=>{session.ui.screen='rooms';session.ui.room=item.roomLabel;session.ui.expanded=item.id;session.ui.editDate=editor.date;await persist();render();},'button'));
+        batch.append(button('Discard entry',()=>confirmDelete({itemId:item.id,day:editor.date}),'link-button danger'));
       });
       const unreviewed=pending.filter(record=>!W.approvalFor(session,record));
       if(unreviewed.length){const review=button('Review & sign off',()=>reviewDay(day),'button primary block');review.disabled=editors.length>0 || unreviewed.some(record=>!W.validateRecord(session,model,record).ready);batch.append(review);}
@@ -391,7 +432,7 @@
           box.append(button('Download package again',()=>prepareRepeat(entry.id),'button block','down'));group.append(box);
         });batch.append(group);
       }
-      content.append(batch);
+      deletedEntries(batch,day);content.append(batch);
     });
   }
   function reviewDay(day){
@@ -451,10 +492,11 @@
   }
   function renderPhotos(){
     resetContent();heading('Photos','EVIDENCE',model.reportingWeek+' · Building - Date folders');
-    const dates=[...new Set(photos.map(photo=>photo.captureDate))].sort().reverse(),choices=[{value:'all',label:'Whole week'},...dates.map(day=>({value:day,label:dayLabel(day)}))];
+    const hidden=W.hiddenPhotoIds(session),available=photos.filter(photo=>!hidden.has(photo.id));
+    const dates=[...new Set(available.map(photo=>photo.captureDate))].sort().reverse(),choices=[{value:'all',label:'Whole week'},...dates.map(day=>({value:day,label:dayLabel(day)}))];
     const picker=select(choices,dates.includes(today)?today:'all'),body=h('div');content.append(field('Captured day',picker),body);
     const update=()=>{
-      body.replaceChildren();const selected=photos.filter(photo=>picker.value === 'all' || photo.captureDate === picker.value);
+      body.replaceChildren();const selected=available.filter(photo=>picker.value === 'all' || photo.captureDate === picker.value);
       body.append(h('p','subtle',selected.length+' saved photos'));
       body.append(photoGrid(selected.map(photo=>photo.id)));
       const exp=button('Download photo ZIP',async()=>{await flush();const blob=await F.photoZip(selected);download(blob,'progress_photos_'+picker.value+'_'+W.uid()+'.zip');notice('Photo ZIP download initiated. Folders use Building - capture date.');},'button primary block','down');exp.disabled=!selected.length;body.append(exp);

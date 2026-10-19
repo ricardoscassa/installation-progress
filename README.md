@@ -11,9 +11,13 @@ Open the app online once and wait for **Offline ready**. Import a prepared weekl
 - Navigate rooms and open one ECS card at a time. Additional ECS are found through the room's typed search.
 - Record gates, percentages, comments and optional photos. Field reporting is limited to 90%.
 - Review the daily draft and record the supervisor's name. Changes after review require another review.
+- ECS at 90% remain editable. Correct a mistaken local selection or update its comments and photos; the reporting maximum remains 90%.
+- Delete a daily entry from its editor or draft. Undo is available in the collapsed Deleted entries section for the loaded week, including its saved photos. Weekly-plan cards remain available. Restored work requires fresh review.
 - Export the daily package, including its complete recovery backup and saved photo bytes. Previous downloads remain available for the active week.
 
 The app records exports; it does not confirm that exported files were received elsewhere.
+
+Export history keeps each original package unchanged. Use Edit current entry to revise local work and prepare a new reviewed batch. Deleting an entry locally does not cancel a previous download or an upload; corrections to uploaded data are handled manually in its destination.
 
 ## Offline storage and recovery
 
