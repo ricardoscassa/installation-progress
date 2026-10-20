@@ -499,22 +499,20 @@
   async function offerDailyDownload(result){
     session=result.future;await persist();render();
     const buildingCount=result.log.records.filter(row=>W.isCheckin(row.payload.record)).length,ecsCount=result.log.records.length-buildingCount;
-    const body=dialog('Your daily package is ready');body.append(h('p','',dayLabel(result.log.date)+' · '+ecsCount+' ECS items'+(buildingCount?' · '+buildingCount+' building check-in'+(buildingCount === 1?'':'s'):'')+'. CSV and recovery data contain no image bytes.'));
+    const body=dialog('Your daily package is ready');body.append(h('p','subtle',dayLabel(result.log.date)+' · '+ecsCount+' ECS item'+(ecsCount === 1?'':'s')+(buildingCount?' · '+buildingCount+' building check-in'+(buildingCount === 1?'':'s'):'')));
     preparedDownloadURL=URL.createObjectURL(result.blob);
-    const save=h('a','button primary block',result.photoBlob?'Save data + photos':'Save ZIP file');save.href=preparedDownloadURL;save.download='daily_progress_'+result.log.date+'_'+result.log.id+'.zip';save.id='save-daily-file';
-    let photoSave=null,dataOnly=null;
-    if(result.photoBlob){preparedPhotoURL=URL.createObjectURL(result.photoBlob);photoSave=h('a','button block','Save / retry companion photo ZIP');photoSave.id='save-companion-photos';photoSave.href=preparedPhotoURL;photoSave.download='daily_photos_'+result.log.date+'_'+result.log.id+'.zip';photoSave.addEventListener('click',()=>{const entry=session.exports.find(value=>value.id === result.log.id);entry.photoDownloadStartedAt=new Date().toISOString();persist().catch(showError);});dataOnly=h('a','link-button','Save / retry data ZIP only');dataOnly.href=preparedDownloadURL;dataOnly.download=save.download;dataOnly.id='save-data-only';}
+    const save=h('a','button primary block export-download','Save Data');save.href=preparedDownloadURL;save.download='daily_progress_'+result.log.date+'_'+result.log.id+'.zip';save.id='save-daily-file';
+    let photoSave=null;
+    if(result.photoBlob){preparedPhotoURL=URL.createObjectURL(result.photoBlob);photoSave=h('a','button primary block export-download','Save Photos');photoSave.id='save-companion-photos';photoSave.href=preparedPhotoURL;photoSave.download='daily_photos_'+result.log.date+'_'+result.log.id+'.zip';photoSave.addEventListener('click',()=>{const entry=session.exports.find(value=>value.id === result.log.id);entry.photoDownloadStartedAt=new Date().toISOString();persist().catch(showError);});}
     // This native link is tapped after ZIP preparation, retaining Safari's download gesture.
-    save.addEventListener('click',event=>{
+    save.addEventListener('click',()=>{
       const entry=session.exports.find(value=>value.id === result.log.id);entry.status='download-started';entry.lastDownloadAt=new Date().toISOString();entry.downloadCount=(entry.downloadCount || 0)+1;
       entry.pairId=result.pair.id;entry.lastRecoveryHash=result.pair.recoverySha256;
-      // Both files are already prepared. This click retains a native download gesture.
-      if(photoSave){event.preventDefault();dataOnly.click();photoSave.click();}
       persist().then(()=>{render();scheduleCheckpoint();}).catch(showError);
       notice('Download started. The same package remains available in Previous downloads.');
     });
-    body.append(save);if(photoSave)body.append(photoSave,dataOnly,h('p','note','Save BOTH ZIPs for complete restoration. If only one download starts, use the separate save links above. A started download does not confirm that Files saved it.'));
-    body.append(h('p','subtle','Save in Files or OneDrive. If interrupted or deleted, use Download package again on the Export screen.'));
+    body.append(save);if(photoSave)body.append(photoSave);
+    body.append(h('p','subtle',photoSave?'Save Data includes the CSV and data backup. Save both files for complete recovery.':'Save Data includes the CSV and data backup.'));
   }
   function renderPhotos(){
     resetContent();heading('Photos','EVIDENCE',model.reportingWeek+' · Building / capture date folders');

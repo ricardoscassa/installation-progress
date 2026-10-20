@@ -51,3 +51,5 @@ h1{font-size:25px}h2{font-size:19px;margin-top:20px}h3{font-size:15px;margin-top
 .comparison-gate:empty,.comparison-mpower-gate:empty,.compact-mpower .comparison-mpower-gate{display:none}
 .button[aria-pressed=true]{background:#fff0e4;border-color:var(--orange);color:var(--orange)}
 .checkin-owner{display:block;margin-top:4px;color:var(--muted);font-size:13px}
+
+a.export-download{text-decoration:none}
