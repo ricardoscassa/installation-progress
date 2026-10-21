@@ -182,8 +182,12 @@
             }
             planned.push(item); planReferences.set(item.referenceKey, item);
         }
-        const scopes = [...new Set(planned.map(item => scopeKey(item.building, item.room, item.commodity)))];
+        const plannedScopes = [...new Set(planned.map(item => scopeKey(item.building, item.room, item.commodity)))];
         const locations = new Set(planned.map(item => key(item.building, item.room)));
+        // Optional extended scopes are authorised by the reporting work-group
+        // selection in weekly-core. Never authorise a room absent from the plan.
+        const allowedScopes = Array.isArray(options.allowedScopes) ? options.allowedScopes : [];
+        const scopes = [...new Set([...plannedScopes,...allowedScopes])];
         const candidates = new Map();
         for (const row of ecs.rows) {
             if (!row.building || !row.room || !row.ecsCode || !row.commodity) { stats.discardedUnresolved += 1; continue; }
@@ -214,6 +218,7 @@
             sessionId: options.sessionId || (root.crypto && root.crypto.randomUUID ? root.crypto.randomUUID() : `session-${Date.now()}-${Math.random().toString(36).slice(2)}`),
             preparedAt: new Date().toISOString(), reportingWeek: week, entryDate: text(options.entryDate), operator: text(options.operator),
             scopes, plannedKeys: [...planReferences.keys()], items, roomCodes, stats,
+            ...(options.workGroupVersion === 1 ? {workGroupVersion:1} : {}),
             config: validateConfig(options.config || defaultConfig()), exports: [], expandedId: ''
         };
     }
@@ -318,7 +323,14 @@
         for (const item of model.items) {
             if (item.origin === 'Weekly Plan' && model.plannedKeys.includes(item.referenceKey)) plannedScopes.add(scopeKey(item.building, item.room, item.commodity));
         }
-        if (model.scopes.some(scope => !plannedScopes.has(scope)) || plannedScopes.size !== model.scopes.length) throw new Error('The package scope is not defined by its weekly planned work.');
+        if (model.workGroupVersion === 1) {
+            // Extended work-group packages may include unplanned commodity
+            // scopes, but every scope must have at least one actual item and
+            // must belong to a room anchored by this week's planned work.
+            const plannedRooms = new Set(model.items.filter(item => item.origin === 'Weekly Plan' && model.plannedKeys.includes(item.referenceKey)).map(item => key(item.building,item.room)));
+            const itemScopes = new Set(model.items.map(item => scopeKey(item.building,item.room,item.commodity)));
+            if (model.scopes.length !== new Set(model.scopes).size || model.scopes.some(scope=>!itemScopes.has(scope)) || [...itemScopes].some(scope=>!model.scopes.includes(scope)) || [...plannedScopes].some(scope=>!model.scopes.includes(scope)) || model.items.some(item=>!plannedRooms.has(key(item.building,item.room)))) throw new Error('The package contains an ECS outside its selected planned rooms.');
+        } else if (model.scopes.some(scope => !plannedScopes.has(scope)) || plannedScopes.size !== model.scopes.length) throw new Error('The package scope is not defined by its weekly planned work.');
         const expectedRooms = {};
         for (const item of model.items) {
             if (!item.building || !item.room || !item.ecsCode || !item.commodity || !model.scopes.includes(scopeKey(item.building, item.room, item.commodity))) throw new Error('The package contains an ECS outside its weekly room/commodity scope.');

@@ -147,9 +147,20 @@
       assert(Array.isArray(item.metadataIssues),'Invalid reference validation metadata.');
       model.items.push(item);
       if(model.workGroupVersion)assert(workGroup(item),'This package contains work outside its reporting groups.');
-      if (item.origin === 'Weekly Plan') { model.plannedKeys.push(item.referenceKey); model.scopes.push(R.scopeKey(item.building,item.room,item.commodity)); }
+      if (item.origin === 'Weekly Plan') model.plannedKeys.push(item.referenceKey);
+      // Schema 2 work-group packages derive all authorised commodity scopes
+      // from the packed rows. Legacy packages retain the planned-only scopes.
+      if (model.workGroupVersion || item.origin === 'Weekly Plan') model.scopes.push(R.scopeKey(item.building,item.room,item.commodity));
     });
     model.scopes = [...new Set(model.scopes)];
+    if(model.workGroupVersion){
+      const allowed=new Map();
+      model.items.filter(item=>item.origin === 'Weekly Plan').forEach(item=>{
+        const id=R.key(item.building);if(!allowed.has(id))allowed.set(id,new Set());
+        allowed.get(id).add(workGroup(item));
+      });
+      assert(model.items.every(item=>workGroup(item) && allowed.get(R.key(item.building))?.has(workGroup(item))),'This package contains an ECS outside its planned building work groups.');
+    }
     return R.validateModel(model);
   }
   function createSession(model, operator = model.recorder || {}, now = new Date().toISOString()) {
