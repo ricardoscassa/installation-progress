@@ -6,6 +6,8 @@ An offline application for recording weekly installation progress by building an
 
 Open the app online once and wait for **Offline ready**. Import a prepared weekly ZIP and confirm the person recording the work. Keep using the same browser and address to return to saved work.
 
+Weekly packages can authorise complete work groups within the selected buildings and rooms, including commodities with no planned ECS in that room. Version 1.5 reads both these packages and earlier weekly ZIPs. Apply the cached app update before loading a newly prepared package; updating retains existing saved work.
+
 ## Daily work
 
 - Navigate rooms and open one ECS card at a time. Additional ECS are found through the room's typed search.
