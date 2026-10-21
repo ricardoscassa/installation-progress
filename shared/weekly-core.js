@@ -3,15 +3,8 @@
   'use strict';
   const R = typeof module === 'object' && module.exports ? require('./production-core.js') : root.ProductionCore;
   const copy = R.copy, text = R.text;
-  const VERSION = '1.4.2';
-  // Reporting ownership is separate from the ECS gate/field workflow.
-  // Add a group here when another team joins; gate definitions remain unchanged.
-  const WORK_GROUPS = [
-    {id:'supports',label:'All Supports',commodities:['MECH-SUPPORT','ELEC-SUPPORT','HVAC-SUPPORT','INST-SUPPORT','NSSS-SUPPORT','CLAMP']},
-    {id:'electrical',label:'Electrical',families:['Electrical']},
-    {id:'pipe',label:'Piping',families:['Pipe']},
-    {id:'hvac',label:'HVAC',families:['HVAC']}
-  ];
+  const VERSION = '1.5.0';
+  const {WORK_GROUPS,workGroup,rowGroup} = R;
   const uid = (prefix = '') => prefix + (root.crypto?.randomUUID ? root.crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
   function stable(value) {
     if (value === undefined) return 'null';
@@ -26,18 +19,6 @@
   }
   function config() { return { ...R.defaultConfig(), inspectionRequired:false, photoRequired:false }; }
   const groupLabel=id=>WORK_GROUPS.find(group=>group.id === id)?.label || 'Work group not specified';
-  function workGroup(item){
-    const resolved=R.workflow({commodity:item.commodity || item.Commodity,structure:item.structure || item.GateStatusStructure});
-    if(!resolved.valid || ['HPC-BIP-COATING','HPC-BIP-EQUIPMENT'].includes(resolved.category))return '';
-    const specific=WORK_GROUPS.find(group=>group.commodities?.includes(resolved.commodity));
-    if(specific)return specific.id;
-    return WORK_GROUPS.find(group=>group.families?.includes(resolved.family))?.id || '';
-  }
-  function rowGroup(row){
-    if(text(row.structure || row.GateStatusStructure))return workGroup(row);
-    const commodity=R.canonical(row.commodity || row.Commodity),groups=[...new Set(R.gates.pairs.filter(pair=>pair.commodity === commodity).map(workGroup).filter(Boolean))];
-    return groups.length === 1?groups[0]:'';
-  }
   function recorder(value={},required=false){
     const result={name:text(value.name),email:text(value.email)};
     assert(result.name.length<=255 && result.email.length<=255 && (!required || result.name.length>=2),'Enter the person recording this week (2–255 characters).');
@@ -45,6 +26,13 @@
   }
   function groupScopes(model){
     const scopes=new Map();
+    if(model.selection){
+      for(const selected of R.validateSelection(model.selection).scopes)for(const groupId of selected.groups){
+        const workflows=R.gates.pairs.filter(pair=>workGroup(pair) === groupId).map(pair=>({commodity:R.canonical(pair.commodity),structure:pair.structure}));
+        scopes.set(R.key(selected.building,groupId),{building:selected.building,groupId,workflows:[...new Map(workflows.map(row=>[stable(row),row])).values()]});
+      }
+      return [...scopes.values()];
+    }
     model.items.filter(item=>item.origin === 'Weekly Plan').forEach(item=>{
       const groupId=workGroup(item);if(!groupId)return;const key=R.key(item.building,groupId);
       if(!scopes.has(key))scopes.set(key,{building:item.building,groupId,workflows:[]});
@@ -109,20 +97,22 @@
       if(sources.some(source=>source.GateStatusStructure !== ref.GateStatusStructure || source.ReportedPercent !== ref.ReportedPercent || source.ReportedGateStatus !== ref.ReportedGateStatus || source.PercentComplete !== ref.PercentComplete || source.GateStatus !== ref.GateStatus))item.metadataIssues.push('Conflicting reference rows need review');
       item.fields = {}; item.touched = false; item.revision = 0;
     });
-    if(model.workGroupVersion)assert(model.items.every(item=>workGroup(item)),'This package contains work outside its reporting groups.');
+    if(model.workGroupVersion)assert(model.items.every(item=>item.origin === 'Weekly Plan'?rowGroup(item):workGroup(item)),'This package contains work outside its reporting groups.');
     return R.validateModel(model);
   }
   const COLUMNS = ['building','room','ecsCode','commodity','structure','sourceGate','sourcePercent','sourceUpdatedAt','description','origin','metadataIssues','mpowerPercent','mpowerGate','weeklyItemId','ecsItemId','rawPlan','rawReference','roomAssignment'];
   function pack(model) {
     const clean = R.validateModel(model);
-    return {format:'weekly-progress-package',schema:clean.workGroupVersion?2:1,version:VERSION,id:clean.sessionId,week:clean.reportingWeek,
+    return {format:'weekly-progress-package',schema:clean.selection?3:clean.workGroupVersion?2:1,version:VERSION,id:clean.sessionId,week:clean.reportingWeek,
       sourceWeekKey:clean.sourceWeekKey || clean.reportingWeek,createdAt:clean.preparedAt,ruleVersion:R.gates.version,
       ...(clean.recorder?{recorder:recorder(clean.recorder,true)}:{}),...(clean.workGroupVersion?{workGroupVersion:clean.workGroupVersion}:{}),
+      ...(clean.selection?{selection:R.validateSelection(clean.selection)}:{}),
       config:clean.config,stats:clean.stats,columns:COLUMNS,rows:clean.items.map(item => COLUMNS.map(name => item[name] ?? null))};
   }
   function unpack(data) {
-    assert(data?.format === 'weekly-progress-package' && [1,2].includes(data.schema),'Unsupported weekly package.');
-    assert(data.schema === 2?data.workGroupVersion === 1:!data.workGroupVersion,'Weekly package metadata/schema do not match.');
+    assert(data?.format === 'weekly-progress-package' && [1,2,3].includes(data.schema),'Unsupported weekly package.');
+    assert(data.schema >= 2?data.workGroupVersion === 1:!data.workGroupVersion,'Weekly package metadata/schema do not match.');
+    assert(data.schema === 3?!!data.selection:!data.selection,'Weekly package selection/schema do not match.');
     assert(data.ruleVersion === R.gates.version,'This package uses different gate rules. Update the app before loading it.');
     assert(Array.isArray(data.rows) && data.rows.length <= 50000 && data.rows.length > 0,'Invalid package row count.');
     assert(stable(data.columns) === stable(COLUMNS),'Unsupported package columns.');
@@ -130,6 +120,7 @@
     assert(R.normaliseWeek(data.sourceWeekKey || week) === week,'Package WeekKey does not match its reporting week.');
     const model = {schema:1,version:VERSION,sessionId:text(data.id),reportingWeek:week,sourceWeekKey:data.sourceWeekKey || week,
       preparedAt:data.createdAt,ruleVersion:data.ruleVersion,config:R.validateConfig(data.config),scopes:[],plannedKeys:[],items:[],stats:data.stats || {},exports:[]};
+    if(data.selection)model.selection=R.validateSelection(data.selection);
     if(data.recorder)model.recorder=recorder(data.recorder,true);
     if(data.workGroupVersion){assert(data.workGroupVersion === 1,'Unsupported reporting work groups. Update the app.');model.workGroupVersion=1;}
     assert(model.config.inspectionRequired === false && model.config.photoRequired === false,'This package is not a daily-progress configuration.');
@@ -146,8 +137,9 @@
       item.fields = {}; item.manual = false; item.touched = false; item.revision = 0; item.sourceRows = [];
       assert(Array.isArray(item.metadataIssues),'Invalid reference validation metadata.');
       model.items.push(item);
-      if(model.workGroupVersion)assert(workGroup(item),'This package contains work outside its reporting groups.');
-      if (item.origin === 'Weekly Plan') { model.plannedKeys.push(item.referenceKey); model.scopes.push(R.scopeKey(item.building,item.room,item.commodity)); }
+      if(model.workGroupVersion)assert(item.origin === 'Weekly Plan'?rowGroup(item):workGroup(item),'This package contains work outside its reporting groups.');
+      if (item.origin === 'Weekly Plan') model.plannedKeys.push(item.referenceKey);
+      if (model.workGroupVersion || item.origin === 'Weekly Plan') model.scopes.push(R.scopeKey(item.building,item.room,item.commodity));
     });
     model.scopes = [...new Set(model.scopes)];
     return R.validateModel(model);

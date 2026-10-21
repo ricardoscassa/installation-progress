@@ -77,7 +77,7 @@
   async function readWeekly(file) {
     const archive=await loadZip(file,20*1024*1024);
     const manifest=await jsonEntry(archive,'manifest.json',50000), raw=await readEntry(archive,'week.json');
-    W.assert(manifest.format === 'weekly-progress-package' && [1,2].includes(manifest.schema) && manifest.bytes === raw.length && await sha(raw) === manifest.sha256,'Weekly package integrity check failed.');
+    W.assert(manifest.format === 'weekly-progress-package' && [1,2,3].includes(manifest.schema) && manifest.bytes === raw.length && await sha(raw) === manifest.sha256,'Weekly package integrity check failed.');
     const packed=JSON.parse(decoder.decode(raw));W.assert(packed.schema === manifest.schema,'Weekly package schemas do not match.');return W.unpack(packed);
   }
   const FIELD_IDS=['Level','InstallationStatus','MetersInstalled','FieldWeld','WeldComplete','WelderID','Material','DiameterMM','SpoolLengthMM','ClampType','BatchNumber','DelayCode'];
@@ -185,7 +185,7 @@
   async function readRecovery(file,companionFile=null) {
     const archive=await loadZip(file), raw=await readEntry(archive,'recovery.json',30*1024*1024);
     const manifest=await jsonEntry(archive,'recovery-manifest.json',50000), data=JSON.parse(decoder.decode(raw));
-    W.assert([1,2].includes(manifest.schema) && await sha(raw) === manifest.sha256 && data.format === 'weekly-progress-recovery' && data.schema === manifest.schema,'Recovery integrity check failed.');
+    W.assert([1,2,3].includes(manifest.schema) && await sha(raw) === manifest.sha256 && data.format === 'weekly-progress-recovery' && data.schema === manifest.schema,'Recovery integrity check failed.');
     W.assert(data.photos.length === manifest.photos && data.pending.length === manifest.pending,'Recovery photo count mismatch.');
     let evidence=archive;
     if(data.schema === 2 && (data.photos.length || data.pending.length)){

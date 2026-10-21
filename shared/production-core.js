@@ -108,6 +108,43 @@
         return { commodity, structure, family, category, valid: !!pair && rules.length > 0, rules };
     }
 
+    // Reporting ownership is separate from the ECS gate/field workflow.
+    // Add a group here when another team joins; gate definitions remain unchanged.
+    const WORK_GROUPS = [
+      {id:'supports',label:'All Supports',commodities:['MECH-SUPPORT','ELEC-SUPPORT','HVAC-SUPPORT','INST-SUPPORT','NSSS-SUPPORT','CLAMP']},
+      {id:'electrical',label:'Electrical',families:['Electrical']},
+      {id:'pipe',label:'Piping',families:['Pipe']},
+      {id:'hvac',label:'HVAC',families:['HVAC']}
+    ];
+    function workGroup(item){
+      const resolved=workflow({commodity:item.commodity || item.Commodity,structure:item.structure || item.GateStatusStructure});
+      if(!resolved.valid || ['HPC-BIP-COATING','HPC-BIP-EQUIPMENT'].includes(resolved.category))return '';
+      const specific=WORK_GROUPS.find(group=>group.commodities?.includes(resolved.commodity));
+      if(specific)return specific.id;
+      return WORK_GROUPS.find(group=>group.families?.includes(resolved.family))?.id || '';
+    }
+    function rowGroup(row){
+      if(text(row.structure || row.GateStatusStructure))return workGroup(row);
+      const commodity=canonical(row.commodity || row.Commodity),groups=[...new Set(gates.pairs.filter(pair=>pair.commodity === commodity).map(workGroup).filter(Boolean))];
+      return groups.length === 1?groups[0]:'';
+    }
+
+    function validateSelection(value) {
+        if (!value || value.version !== 1 || !Array.isArray(value.scopes) || !value.scopes.length || value.scopes.length > 100) throw new Error('Invalid authorised work selection.');
+        const seen = new Set();
+        const scopes = value.scopes.map(scope => {
+            const validText = value => typeof value === 'string' && value === text(value) && value.length > 0 && value.length <= 255;
+            if (!validText(scope?.building) || seen.has(norm(scope.building)) || !Array.isArray(scope.rooms) || !scope.rooms.length || scope.rooms.length > 1000 || !scope.rooms.every(validText) || new Set(scope.rooms.map(norm)).size !== scope.rooms.length || !Array.isArray(scope.groups) || !scope.groups.length || new Set(scope.groups).size !== scope.groups.length || !scope.groups.every(id => WORK_GROUPS.some(group => group.id === id))) throw new Error('Invalid building, rooms or work groups in authorised selection.');
+            seen.add(norm(scope.building));
+            return {building:scope.building,rooms:[...scope.rooms],groups:[...scope.groups]};
+        });
+        return {version:1,scopes};
+    }
+    function selectedItem(selection, item, planned = false) {
+        const group = planned ? rowGroup(item) : workGroup(item);
+        return !!group && selection.scopes.some(scope => norm(scope.building) === norm(item.building) && scope.rooms.some(room => norm(room) === norm(item.room)) && scope.groups.includes(group));
+    }
+
     function makeItem(row, origin, week, issues = []) {
         const roomLabel = `${text(row.building)} · ${text(row.room)}`;
         const sourcePercent = number(row.sourcePercent);
@@ -182,13 +219,14 @@
             }
             planned.push(item); planReferences.set(item.referenceKey, item);
         }
+        const selection = options.selection ? validateSelection(options.selection) : null;
         const scopes = [...new Set(planned.map(item => scopeKey(item.building, item.room, item.commodity)))];
         const locations = new Set(planned.map(item => key(item.building, item.room)));
         const candidates = new Map();
         for (const row of ecs.rows) {
             if (!row.building || !row.room || !row.ecsCode || !row.commodity) { stats.discardedUnresolved += 1; continue; }
             if (!locations.has(key(row.building, row.room))) { stats.discardedLocation += 1; continue; }
-            if (!scopes.includes(scopeKey(row.building, row.room, row.commodity))) { stats.discardedCommodity += 1; continue; }
+            if (selection ? !selectedItem(selection, row) : !scopes.includes(scopeKey(row.building, row.room, row.commodity))) { stats.discardedCommodity += 1; continue; }
             if (planReferences.has(referenceKey(row))) { stats.plannedDuplicates += 1; continue; }
             const item = makeItem(row, 'ECS Search', week);
             if (candidates.has(item.referenceKey)) {
@@ -198,6 +236,7 @@
             } else candidates.set(item.referenceKey, item);
         }
         const items = [...planned, ...candidates.values()];
+        if (selection) items.forEach(item => { const scope = scopeKey(item.building,item.room,item.commodity); if (!scopes.includes(scope)) scopes.push(scope); });
         const roomCodes = {}, roomScopes = {}, codeIds = new Set();
         for (const item of items) {
             if (codeIds.has(item.codeId)) throw new Error('Ambiguous room/ECS label. Correct the source identifiers.');
@@ -214,6 +253,7 @@
             sessionId: options.sessionId || (root.crypto && root.crypto.randomUUID ? root.crypto.randomUUID() : `session-${Date.now()}-${Math.random().toString(36).slice(2)}`),
             preparedAt: new Date().toISOString(), reportingWeek: week, entryDate: text(options.entryDate), operator: text(options.operator),
             scopes, plannedKeys: [...planReferences.keys()], items, roomCodes, stats,
+            ...(selection ? {selection,workGroupVersion:1} : {}),
             config: validateConfig(options.config || defaultConfig()), exports: [], expandedId: ''
         };
     }
@@ -314,18 +354,37 @@
         if (!model || model.schema !== 1 || !Array.isArray(model.items) || !Array.isArray(model.scopes) || !Array.isArray(model.plannedKeys) || !text(model.sessionId)) throw new Error('Unsupported weekly-work package.');
         model.reportingWeek = normaliseWeek(model.reportingWeek);
         model.config = validateConfig(model.config);
-        const ids = new Set(), codeIds = new Set(), plannedScopes = new Set();
+        const ids = new Set(), codeIds = new Set(), referenceIds = new Set(), plannedScopes = new Set();
         for (const item of model.items) {
             if (item.origin === 'Weekly Plan' && model.plannedKeys.includes(item.referenceKey)) plannedScopes.add(scopeKey(item.building, item.room, item.commodity));
         }
-        if (model.scopes.some(scope => !plannedScopes.has(scope)) || plannedScopes.size !== model.scopes.length) throw new Error('The package scope is not defined by its weekly planned work.');
+        const planned = model.items.filter(item => item.origin === 'Weekly Plan');
+        if (!planned.length || new Set(model.plannedKeys).size !== model.plannedKeys.length || model.plannedKeys.length !== planned.length || planned.some(item => !model.plannedKeys.includes(item.referenceKey))) throw new Error('Invalid weekly planned identities.');
+        if (model.selection || model.workGroupVersion === 1) {
+            // Older group packages have no explicit selection: constrain them to
+            // planned rooms and groups in each building, never arbitrary rows.
+            const legacy = new Map();
+            planned.forEach(item => {
+                const id = norm(item.building);
+                if (!legacy.has(id)) legacy.set(id, {building:item.building,rooms:[],groups:[]});
+                const scope = legacy.get(id), group = rowGroup(item);
+                if (!scope.rooms.includes(item.room)) scope.rooms.push(item.room);
+                if (group && !scope.groups.includes(group)) scope.groups.push(group);
+            });
+            const selection = validateSelection(model.selection || {version:1,scopes:[...legacy.values()]});
+            const plannedRooms = new Set(planned.map(item => key(item.building,item.room)));
+            if (selection.scopes.some(scope => scope.rooms.some(room => !plannedRooms.has(key(scope.building,room)))) || model.items.some(item => !selectedItem(selection,item,item.origin === 'Weekly Plan'))) throw new Error('An ECS is outside the selected rooms, work groups or configured workflows.');
+            const actualScopes = new Set(model.items.map(item => scopeKey(item.building,item.room,item.commodity)));
+            if (new Set(model.scopes).size !== model.scopes.length || actualScopes.size !== model.scopes.length || model.scopes.some(scope => !actualScopes.has(scope))) throw new Error('The package commodity scopes do not match its authorised records.');
+            if (model.selection) model.selection = selection;
+        } else if (model.scopes.some(scope => !plannedScopes.has(scope)) || plannedScopes.size !== model.scopes.length) throw new Error('The package scope is not defined by its weekly planned work.');
         const expectedRooms = {};
         for (const item of model.items) {
             if (!item.building || !item.room || !item.ecsCode || !item.commodity || !model.scopes.includes(scopeKey(item.building, item.room, item.commodity))) throw new Error('The package contains an ECS outside its weekly room/commodity scope.');
             if (!['Weekly Plan', 'ECS Search'].includes(item.origin) || (item.origin === 'ECS Search' && model.plannedKeys.includes(item.referenceKey))) throw new Error('Invalid planned-work origin.');
-            if (item.id !== key(item.building, item.room, item.ecsCode) || item.referenceKey !== referenceKey(item) || item.roomLabel !== `${text(item.building)} · ${text(item.room)}` || item.codeId !== `${item.roomLabel}-${item.ecsCode}` || ids.has(item.id) || codeIds.has(item.codeId)) throw new Error('Invalid or duplicate ECS identity.');
+            if (item.id !== key(item.building, item.room, item.ecsCode) || item.referenceKey !== referenceKey(item) || item.roomLabel !== `${text(item.building)} · ${text(item.room)}` || item.codeId !== `${item.roomLabel}-${item.ecsCode}` || ids.has(item.id) || codeIds.has(item.codeId) || referenceIds.has(item.referenceKey)) throw new Error('Invalid or duplicate ECS identity.');
             if (item.reportingWeek !== model.reportingWeek) throw new Error('A report belongs to a different reporting week.');
-            ids.add(item.id); codeIds.add(item.codeId);
+            ids.add(item.id); codeIds.add(item.codeId); referenceIds.add(item.referenceKey);
             if (!expectedRooms[item.roomLabel]) expectedRooms[item.roomLabel] = [];
             expectedRooms[item.roomLabel].push(item.ecsCode);
         }
@@ -357,7 +416,7 @@
         if (/^[=+@\-\t\r]/.test(str)) str = `'${str}`;
         return `"${str.replace(/"/g, '""')}"`;
     }
-    const api = { VERSION, gates, HEADERS, copy, text, norm, key, canonical, scopeKey, referenceKey, meaningful, number, parseDelimited, parseTable, normaliseWeek, workflow, resolveWeeklyRooms, prepare, defaultConfig, validateConfig, fieldsFor, validateItem, addManual, validateModel, londonDate, photoFolder, csvCell };
+    const api = { VERSION, gates, WORK_GROUPS, workGroup, rowGroup, validateSelection, selectedItem, HEADERS, copy, text, norm, key, canonical, scopeKey, referenceKey, meaningful, number, parseDelimited, parseTable, normaliseWeek, workflow, resolveWeeklyRooms, prepare, defaultConfig, validateConfig, fieldsFor, validateItem, addManual, validateModel, londonDate, photoFolder, csvCell };
     if (typeof module === 'object' && module.exports) module.exports = api;
     else root.ProductionCore = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

@@ -374,7 +374,7 @@
   function renderSearch(room){
     const box=h('section','search-container');box.id='candidate-search';
     const query=input('search',searchValue,'Type ECS code or description');query.id='candidate-query';
-    box.append(field('Search work in '+room,query),h('p','subtle','Only this room’s weekly commodities are searched.'));
+    box.append(field('Search work in '+room,query),h('p','subtle','Only this room’s selected work groups are searched.'));
     const results=h('div');results.id='candidate-results';box.append(results);content.append(box);
     const update=()=>{
       searchValue=query.value;results.replaceChildren();
@@ -663,7 +663,11 @@
       render();saving(session?'Saved on this device':'No week loaded');
     }catch(error){showError(error);content.replaceChildren(h('h1','','Saved work needs recovery'),button('Open recovery backups',recoveryMenu,'button primary block'));$('settings-button').hidden=true;}
   }
-  $('package-input').addEventListener('change',event=>run(async()=>{const file=event.target.files[0];if(!file)return;stagedModel=await F.readWeekly(file);closeDialog();renderLoad();}));
+  $('package-input').addEventListener('change',event=>run(async()=>{
+    const file=event.target.files[0];if(!file)return;stagedModel=null;
+    try{stagedModel=await F.readWeekly(file);$('error-banner').hidden=true;closeDialog();renderLoad();}
+    finally{event.target.value='';}
+  }));
   $('recovery-input').addEventListener('change',event=>run(async()=>{const files=[...event.target.files];if(!files.length)return;const restored=await F.readRecoveryPair(files);if(session)await checkpoint('Before importing recovery');session=await S.replace(restored.session,restored.model,restored.photos,restored.pending);model=restored.model;photos=restored.photos;pendingPhotos=restored.pending;committedVersion=0;queue=Promise.resolve();storageFailed=false;captureFlight=null;closeDialog();render();notice('External recovery verified and restored.');}));
   $('settings-button').onclick=()=>run(settings);
   document.querySelectorAll('#bottom-menu button').forEach(el=>el.onclick=()=>run(()=>navigate(el.dataset.page)));
