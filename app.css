@@ -53,3 +53,7 @@ h1{font-size:25px}h2{font-size:19px;margin-top:20px}h3{font-size:15px;margin-top
 .checkin-owner{display:block;margin-top:4px;color:var(--muted);font-size:13px}
 
 a.export-download{text-decoration:none}
+.photo-sharing{border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:10px 0;margin:14px 0}
+.photo-sharing>summary{cursor:pointer;min-height:44px;padding:10px 0;font-size:14px;font-weight:650;overflow-wrap:anywhere}
+.photo-sharing .button{font-size:12px}.photo-sharing .link-button{margin-left:10px}.shared-photo-choice{display:flex;align-items:flex-start;gap:10px;border-bottom:1px solid var(--line);padding:11px 0;min-height:50px;font-size:13px;cursor:pointer}
+.shared-photo-choice input{width:21px;height:21px;flex-shrink:0;accent-color:var(--header)}.shared-photo-choice strong,.shared-photo-choice .subtle{display:block;overflow-wrap:anywhere}.shared-photo-choice:has(input:disabled){color:var(--muted);cursor:default}

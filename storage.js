@@ -60,14 +60,16 @@
   function journal(session,editorsOnly=false){
     try{const token=W.uid('JR-'),value=editorsOnly?{schema:1,kind:'editors',token,sessionId:session.id,packageId:session.packageId,generation:session.journalGeneration,editors:session.editors,ui:session.ui}:{schema:1,token,session};localStorage.setItem(JOURNAL,JSON.stringify(value));return token;}catch{return false;}
   }
-  async function save(session,{photo=null,deletePending=null,pending=null}={},attempt=0){
+  async function save(session,{photo=null,photos=[],deletePending=null,pending=null}={},attempt=0){
+    const images=photo?[photo,...photos]:photos;
+    W.assert(Array.isArray(images) && new Set(images.map(value=>value.id)).size === images.length,'Duplicate photo identities in one save.');
     const expected=session.storageVersion,next=W.copy(session);next.storageVersion=expected+1;
     try{await transaction(['sessions','photos','pending'],'readwrite',(stores,tx)=>{
       const request=stores.sessions.get('active');
       request.onsuccess=()=>{
         if(!request.result || request.result.value.id !== next.id || request.result.value.storageVersion !== expected){tx.abort();return;}
         stores.sessions.put({id:'active',value:next});
-        if(photo)stores.photos.put(photo);
+        images.forEach(image=>stores.photos.put(image));
         if(pending)stores.pending.put(pending);
         if(deletePending)stores.pending.delete(deletePending);
       };
@@ -75,12 +77,12 @@
       // Suspension may lose a completion event. Inspect committed state before any retry.
       const current=(await readAll('sessions')).find(row=>row.id === 'active')?.value;
       if(current?.id === next.id && W.stable(current) === W.stable(next)){
-        const storedPhotos=photo?await readAll('photos'):[],storedPending=pending || deletePending?await readAll('pending'):[];
-        W.assert(!photo || storedPhotos.some(value=>value.id === photo.id && value.sha256 === photo.sha256 && value.blob?.size === photo.size),'Committed photo needs recovery.');
+        const storedPhotos=images.length?await readAll('photos'):[],storedPending=pending || deletePending?await readAll('pending'):[];
+        W.assert(images.every(image=>storedPhotos.some(value=>value.id === image.id && value.sha256 === image.sha256 && value.blob?.size === image.size)),'Committed photo needs recovery.');
         W.assert(!pending || storedPending.some(value=>value.id === pending.id && value.sha256 === pending.sha256 && value.blob?.size === pending.size),'Pending original needs recovery.');
         W.assert(!deletePending || !storedPending.some(value=>value.id === deletePending),'Photo transaction needs recovery.');return next;
       }
-      if(!attempt && current?.id === session.id && current.storageVersion === expected && ['AbortError','UnknownError','InvalidStateError'].includes(error.name))return save(session,{photo,deletePending,pending},1);
+      if(!attempt && current?.id === session.id && current.storageVersion === expected && ['AbortError','UnknownError','InvalidStateError'].includes(error.name))return save(session,{photo,photos,deletePending,pending},1);
       throw new Error(current?.id !== session.id || current.storageVersion !== expected?'Saved work changed in another window. Reopen this page before editing.':error.message);
     }
     return next;
