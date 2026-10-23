@@ -1,5 +1,5 @@
 'use strict';
-const CACHE='installation-progress-shell-1.5.0';
+const CACHE='installation-progress-shell-1.6.0';
 const ASSETS=['./','./index.html','./app.css','./app.js','./storage.js','./manifest.webmanifest','./icon.svg',
   './icon-192.png','./icon-512.png','./shared/gate-config.js','./shared/production-core.js','./shared/weekly-core.js','./shared/files.js','./vendor/pako.min.js','./vendor/jszip.min.js'];
 self.addEventListener('install',event=>{

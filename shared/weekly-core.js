@@ -3,7 +3,7 @@
   'use strict';
   const R = typeof module === 'object' && module.exports ? require('./production-core.js') : root.ProductionCore;
   const copy = R.copy, text = R.text;
-  const VERSION = '1.5.0';
+  const VERSION = '1.6.0';
   const {WORK_GROUPS,workGroup,rowGroup} = R;
   const uid = (prefix = '') => prefix + (root.crypto?.randomUUID ? root.crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
   function stable(value) {
@@ -270,6 +270,46 @@
     editor.updatedAt = now; session.editors[editorKey(editor.date,editor.itemId)] = copy(editor);
     session.updatedAt = now;
   }
+  function capturedPhotoItem(model,pending){
+    const item=model.items.find(value=>value.id === pending.itemId),context=pending.context;
+    return item && pending.building === item.building && pending.room === item.room && pending.ecsCode === item.ecsCode && context?.itemId === item.id && context.building === item.building && context.room === item.room && context.ecsCode === item.ecsCode && context.workDate === pending.workDate && context.editor?.itemId === item.id && context.editor.date === pending.workDate?item:null;
+  }
+  function sharedPhotoChoice(session,model,pending,itemId) {
+    const primary=capturedPhotoItem(model,pending),item=model.items.find(item=>item.id === itemId);
+    const rejected=reason=>({allowed:false,reason,item});
+    if(!primary || !item)return rejected('The captured ECS context is missing or changed.');
+    if(item.building !== primary.building || item.room !== primary.room)return rejected('Only ECS in this building and room can share this photo.');
+    if(item.origin !== 'Weekly Plan' && !session.addedIds.includes(item.id))return rejected('Add this ECS to the room before sharing a photo.');
+    const source=R.workflow(primary),target=R.workflow(item),fields=pending.context.editor.fields;
+    if(!source.valid || !target.valid || source.structure !== target.structure)return rejected('Different or unsupported gate-status structure.');
+    if(fields.noProgress || !text(fields.gate))return rejected('Select a progress gate in the ECS card before sharing.');
+    const sourceValidation=validateProgress(primary,fields,{version:1,families:{},commodities:{}},pending.context.editor.previous);
+    if(!sourceValidation.ready)return rejected(sourceValidation.errors.join(' '));
+    const sourceRule=source.rules.find(rule=>rule.code === fields.gate),targetRule=target.rules.find(rule=>rule.code === fields.gate);
+    const percent=sourceRule?.policy === 'Fixed'?sourceRule.percent:R.number(fields.percent);
+    if(!sourceRule || !targetRule || sourceRule.policy !== targetRule.policy || sourceRule.policy === 'Fixed' && sourceRule.percent !== targetRule.percent)return rejected('This ECS does not use the captured gate and percentage.');
+    if(!Number.isFinite(percent) || percent<0 || percent>90)return rejected('Shared field progress must be between 0% and 90%.');
+    const editor=editorFor(session,model,item,pending.workDate),before=copy(editor);
+    editor.fields={...editor.fields,gate:fields.gate,percent,noProgress:false};
+    editor.previous=copy(previousForEdit(session,model,item,editor));
+    // Only gate eligibility is shared. Required item-specific answers are still
+    // checked by the normal draft/sign-off flow, without copying another ECS's values.
+    const validation=validateProgress(item,editor.fields,{version:1,families:{},commodities:{}},editor.previous);
+    if(!validation.ready)return rejected(validation.errors.join(' '));
+    return {allowed:true,item,editor,before,gate:fields.gate,percent,changes:stable(before.fields)!==stable(editor.fields)};
+  }
+  function sharedPhotoPlan(session,model,pending,extraIds=[]) {
+    date(pending.workDate);
+    assert(Array.isArray(extraIds) && new Set(extraIds).size === extraIds.length && !extraIds.includes(pending.itemId),'Invalid repeated shared-photo selection.');
+    const item=capturedPhotoItem(model,pending);
+    assert(item,'The captured ECS context is missing or changed.');
+    const primary={item,editor:editorFor(session,model,item,pending.workDate),context:copy(pending.context)};
+    const others=extraIds.map(id=>{
+      const choice=sharedPhotoChoice(session,model,pending,id);assert(choice.allowed,(choice.item?.ecsCode || id)+': '+choice.reason);
+      return {item:choice.item,editor:choice.editor,context:{...copy(pending.context),itemId:id,building:choice.item.building,room:choice.item.room,ecsCode:choice.item.ecsCode,editor:copy(choice.editor)}};
+    });
+    return [primary,...others];
+  }
   const batchSealed=(session,batchId)=>session.exports.some(entry=>entry.kind === 'daily' && entry.records?.some(row=>row.payload?.record?.batchId === batchId));
   function previousForEdit(session,model,item,editor){
     const record=recordFor(session,editor.date,item.id);
@@ -467,7 +507,7 @@
       photo.ecsCode.replace(/[^a-zA-Z0-9_-]/g,'_').slice(0,80) + '_' + photo.id + '.jpg';
   }
   function namePhoto(photo,existing=[]){
-    const named={...photo,pathVersion:2,fileSuffix:''},paths=new Set(existing.filter(value=>value.id !== photo.id).map(photoPath));
+    const named={...photo,pathVersion:2,fileSuffix:''},paths=existing instanceof Set?existing:new Set(existing.filter(value=>value.id !== photo.id).map(photoPath));
     if(paths.has(photoPath(named))){
       named.fileSuffix='_'+String(new Date(photo.capturedAt).getUTCMilliseconds()).padStart(3,'0');
       if(paths.has(photoPath(named))){let hash=2166136261;for(const char of photo.id)hash=Math.imul(hash^char.charCodeAt(0),16777619)>>>0;named.fileSuffix+='_'+hash.toString(16).padStart(8,'0');}
@@ -485,6 +525,6 @@
     return prepareRows(weekly,refs);
   }
   const api = {VERSION,R,copy,text,uid,newBatchId,stable,assert,date,config,gate,reportedPercent,prepareRows,pack,unpack,createSession,editorKey,recordFor,hasFields,essence,fingerprint,
-    WORK_GROUPS,groupLabel,workGroup,rowGroup,recorder,groupScopes,scopeDisciplines,workConflicts,saveWorkCheckin,isCheckin,noProgressBatchId,validateCheckin,saveBuildingCheckin,pendingCheckins,roomChanged,validateProgress,previousFor,previousForEdit,editorFor,editorDirty,setEditor,saveEditor,validateRecord,approvalFor,exported,pending,sign,visibleItems,search,addCandidate,candidateRemoval,removeCandidate,deleteEntry,restoreCheck,restoreEntry,hiddenPhotoIds,position,validateSession,photoPath,namePhoto,example,today:R.londonDate};
+    WORK_GROUPS,groupLabel,workGroup,rowGroup,recorder,groupScopes,scopeDisciplines,workConflicts,saveWorkCheckin,isCheckin,noProgressBatchId,validateCheckin,saveBuildingCheckin,pendingCheckins,roomChanged,validateProgress,previousFor,previousForEdit,editorFor,editorDirty,setEditor,saveEditor,sharedPhotoChoice,sharedPhotoPlan,validateRecord,approvalFor,exported,pending,sign,visibleItems,search,addCandidate,candidateRemoval,removeCandidate,deleteEntry,restoreCheck,restoreEntry,hiddenPhotoIds,position,validateSession,photoPath,namePhoto,example,today:R.londonDate};
   if (typeof module === 'object' && module.exports) module.exports = api; else root.WeeklyCore = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

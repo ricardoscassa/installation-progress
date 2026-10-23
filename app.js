@@ -2,7 +2,7 @@
   'use strict';
   const W=WeeklyCore,R=W.R,F=WeeklyFiles,S=WeeklyStorage;
   const $=id=>document.getElementById(id),content=$('content'),modal=$('modal'),modalBody=$('modal-body');
-  let cameraInput=$('camera-input'),captureFlight=null,foregroundRecovery=null,photoDrawEpoch=0,preparedPhotoURL=null;
+  let cameraInput=$('camera-input'),captureFlight=null,foregroundRecovery=null,photoDrawEpoch=0,preparedPhotoURL=null,photoCleanup=null,committingPhoto=false;
   let session=null,model=null,photos=[],pendingPhotos=[],queue=Promise.resolve(),committedVersion=0,storageFailed=false,offlineReady=false;
   let stagedModel=null,searchOpen=false,searchValue='',today=W.today(),busy=false,lastCheckpoint=0,objectUrls=[];
   let cameraPending=null,processedPhoto=null,workerRegistration=null,inputSaveTimer=null,noticeTimer=null,preparedDownloadURL=null;
@@ -33,7 +33,7 @@
     if(inputSaveTimer){clearTimeout(inputSaveTimer);inputSaveTimer=null;}
     if(storageFailed)return Promise.reject(new Error('Saving stopped after a storage error. Keep this window open and use recovery or reload.'));
     session.journalGeneration+=1;session.updatedAt=new Date().toISOString();
-    const journalOK=S.journal(session,options.editorOnly && !session.pendingCheckin),snapshot=W.copy(session);
+    const journalOK=S.journal(session,options.editorOnly && !session.pendingCheckin && !session.pendingCapture),snapshot=W.copy(session);
     saving(journalOK?'Saving…':'Saving to database…');
     queue=queue.then(async()=>{
       snapshot.storageVersion=committedVersion;
@@ -46,7 +46,7 @@
   async function flush(){if(inputSaveTimer){clearTimeout(inputSaveTimer);inputSaveTimer=null;await persist({editorOnly:true});}return queue;}
   function persistEditor(){
     if(storageFailed){showError(new Error('Saving has stopped. Keep this page open and recover your work.'));return;}
-    session.journalGeneration+=1;session.updatedAt=new Date().toISOString();S.journal(session,!session.pendingCheckin);saving('Saving…');
+    session.journalGeneration+=1;session.updatedAt=new Date().toISOString();S.journal(session,!session.pendingCheckin && !session.pendingCapture);saving('Saving…');
     if(inputSaveTimer)clearTimeout(inputSaveTimer);
     inputSaveTimer=setTimeout(()=>{inputSaveTimer=null;persist({editorOnly:true}).catch(showError);},120);
   }
@@ -54,7 +54,8 @@
   function image(photo,cls=''){const el=h('img',cls);const url=URL.createObjectURL(photo.blob);objectUrls.push(url);el.loading=cls === 'preview-photo'?'eager':'lazy';el.decoding='async';el.src=url;el.alt=photo.ecsCode+' · '+photo.building+' · '+photo.room;return el;}
   function download(blob,name){const url=URL.createObjectURL(blob),anchor=document.createElement('a');anchor.href=url;anchor.download=name;document.body.append(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);}
   function releaseDownload(){for(const url of [preparedDownloadURL,preparedPhotoURL].filter(Boolean))setTimeout(()=>URL.revokeObjectURL(url),60000);preparedDownloadURL=null;preparedPhotoURL=null;}
-  function closeDialog(){photoDrawEpoch++;modal.close();modalBody.replaceChildren();cameraPending=null;processedPhoto=null;releaseDownload();}
+  function retainCaptureDraft(){if(cameraPending && !committingPhoto)persist({pending:cameraPending}).catch(showError);}
+  function closeDialog(){retainCaptureDraft();photoDrawEpoch++;photoCleanup?.();photoCleanup=null;modal.close();modalBody.replaceChildren();cameraPending=null;processedPhoto=null;releaseDownload();}
   function dialog(title){
     releaseDownload();modalBody.replaceChildren();const row=h('div','dialog-heading'),close=button('×',closeDialog,'dialog-close');close.setAttribute('aria-label','Close dialog');
     row.append(h('h2','',title),close);modalBody.append(row);if(!modal.open)modal.showModal();return modalBody;
@@ -319,6 +320,7 @@
     readiness();return body;
   }
   function removeAdded(item){
+    W.assert(!pendingPhotos.some(photo=>captureReferences(photo,item.id)),'Finish the interrupted shared photo before removing this ECS.');
     const removal=W.candidateRemoval(session,model,item.id);W.assert(removal.allowed,removal.reason);
     const body=dialog('Remove added ECS?');body.append(h('p','',item.ecsCode+' will leave this room and remain available in Add ECS search. Any unfinished values will be kept in recovery.'));
     body.append(button('Remove from room',async()=>{await checkpoint('Before removing added ECS');W.removeCandidate(session,model,item.id);await persist();closeDialog();renderRooms();notice('Added ECS removed. It is still available in search.');},'button danger block'));
@@ -331,7 +333,7 @@
   async function confirmDelete(context){
     await flush();const record=context.recordId?[...session.records,...(session.checkins || [])].find(record=>record.id === context.recordId):W.recordFor(session,context.day,context.itemId);
     const item=sourceItem(record?.itemId || context.itemId),day=record?.date || context.day;
-    W.assert(!item || !pendingPhotos.some(photo=>photo.itemId === item.id && photo.workDate === day),'Finish the interrupted photo before deleting this entry.');
+    W.assert(!item || !pendingPhotos.some(photo=>captureReferences(photo,item.id) && photo.workDate === day),'Finish the interrupted photo before deleting this entry.');
     const body=dialog('Delete daily entry?'),label=W.isCheckin(record)?record.building+' · '+W.groupLabel(record.groupId)+' · '+record.supervisorName:item.ecsCode+' · room '+item.room;
     body.append(h('p','',label+' · '+dayLabel(day)),h('p','','This removes the entry from current work. Undo keeps its values and photos available for this week. Loaded weekly-plan ECS stay in the room.'));
     if(record && wasExported(record))body.append(h('p','note','Earlier downloads keep this entry. Deleting here does not cancel anything already uploaded; corrections there are manual.'));
@@ -552,46 +554,132 @@
   async function acceptCamera(file,capturedContext=null,sessionId=session?.id){
     W.assert(file && file.type.startsWith('image/') && file.size>0 && file.size <= 25*1024*1024,'Choose an image up to 25 MB.');
     const context=capturedContext || session.pendingCapture;W.assert(context && session.id === sessionId,'The camera target changed. Keep this original file and reopen its ECS.');
-    const raw=new Uint8Array(await file.arrayBuffer()),pending={id:W.uid('PH-'),itemId:context.itemId,workDate:context.workDate,
-      building:context.building,room:context.room,ecsCode:context.ecsCode,capturedAt:new Date().toISOString(),captureDate:W.today(),
+    const raw=new Uint8Array(await photoTimeout(file.arrayBuffer(),'The photo could not be read from this device. Keep its original in Photos and try again.')),capturedAt=new Date().toISOString(),pending={id:W.uid('PH-'),itemId:context.itemId,workDate:context.workDate,
+      building:context.building,room:context.room,ecsCode:context.ecsCode,capturedAt,captureDate:W.today(capturedAt),
       context:W.copy(context),blob:file,type:file.type,size:file.size,sha256:await F.sha(raw),crc32:F.crc32(raw)};
     W.assert(session.id === sessionId,'The active week changed during capture.');
     await persist({pending});pendingPhotos.push(pending);await resumePhoto(pending);
   }
+  function photoTimeout(promise,message){
+    let timer;return Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error(message)),15000);})]).finally(()=>clearTimeout(timer));
+  }
+  async function decodePhoto(blob){
+    if(typeof createImageBitmap === 'function'){
+      let expired=false;
+      try{const bitmap=await photoTimeout(createImageBitmap(blob).then(value=>{if(expired){value.close();throw new Error('Photo decoding was interrupted.');}return value;}),'Photo decoding was interrupted.');return {image:bitmap,width:bitmap.width,height:bitmap.height,close:()=>bitmap.close()};}
+      catch{expired=true;}
+    }
+    const image=new Image(),url=URL.createObjectURL(blob);
+    try{await photoTimeout(new Promise((resolve,reject)=>{image.onload=resolve;image.onerror=()=>reject(new Error('This image format could not be decoded on this device.'));image.src=url;}),'Photo decoding was interrupted.');return {image,width:image.naturalWidth,height:image.naturalHeight,close:()=>{image.src='';URL.revokeObjectURL(url);}};}
+    catch(error){URL.revokeObjectURL(url);throw error;}
+  }
+  async function stampPhoto(decoded,canvas,pending,context,note){
+    const scale=Math.min(1,1800/Math.max(decoded.width,decoded.height)),pictureHeight=Math.max(1,Math.round(decoded.height*scale));
+    canvas.width=Math.max(320,Math.round(decoded.width*scale));canvas.height=pictureHeight+(note?160:128);
+    const painter=canvas.getContext('2d');W.assert(painter,'Photo drawing is unavailable on this device.');
+    painter.fillStyle='#fff';painter.fillRect(0,0,canvas.width,canvas.height);painter.drawImage(decoded.image,0,0,canvas.width,pictureHeight);
+    painter.fillStyle='#172c42';painter.fillRect(0,pictureHeight,canvas.width,canvas.height-pictureHeight);painter.fillStyle='#fff';
+    painter.font='bold '+Math.max(14,Math.round(canvas.width/45))+'px sans-serif';
+    const fields=context.editor.fields,previous=context.editor.previous,gate=fields.noProgress?previous.gate:fields.gate,percent=fields.noProgress?previous.percent:fields.percent;
+    [context.building+' · '+context.room,context.ecsCode,time(pending.capturedAt)+' · '+(gate || 'Gate not recorded')+' · '+(percent ?? '—')+'%'+(fields.noProgress?' · No Progress':''),note].filter(Boolean).forEach((line,index)=>painter.fillText(line,14,pictureHeight+29+index*32,canvas.width-28));
+    const blob=await photoTimeout(new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',.82)),'Photo preparation was interrupted. The original is retained; reopen the capture to retry.');
+    W.assert(blob?.size,'The stamped photo could not be prepared. Its original is retained.');return blob;
+  }
+  function captureDraft(pending){return session.pendingCapture?.photoDraft?.id === pending.id?session.pendingCapture.photoDraft:pending.photoDraft;}
+  function captureReferences(pending,itemId){return pending.itemId === itemId || (captureDraft(pending)?.extraIds || []).includes(itemId);}
   async function resumePhoto(pending){
+    photoCleanup?.();photoCleanup=null;
     cameraPending=pending;processedPhoto=null;
     const body=dialog('Photo stamp');cameraPending=pending;
     const drawEpoch=++photoDrawEpoch,sessionId=session.id;
+    const previousDraft=captureDraft(pending),draft={id:pending.id,extraIds:[],note:'',opened:false,confirmed:false,...W.copy(previousDraft || {})};
+    draft.id=pending.id;
+    W.assert(Array.isArray(draft.extraIds) && draft.extraIds.every(id=>typeof id === 'string') && typeof draft.note === 'string' && draft.note.length<=500,'The interrupted photo selection needs recovery.');
+    const remember=()=>{if(drawEpoch !== photoDrawEpoch || cameraPending?.id !== pending.id || session?.id !== sessionId || committingPhoto)return;pending.photoDraft=W.copy(draft);session.pendingCapture={...W.copy(pending.context),photoDraft:W.copy(draft)};persistEditor();};
+    const isCurrent=()=>drawEpoch === photoDrawEpoch && cameraPending?.id === pending.id && session?.id === sessionId && canvas.isConnected;
     body.append(h('p','subtle',pending.ecsCode+' · '+pending.building+' · '+pending.room+' · '+pending.workDate));
     const canvas=h('canvas');canvas.setAttribute('aria-label','Photo with captured ECS context');body.append(canvas);
-    const noteInput=input('text','','Optional photo note');body.append(field('Photo note',noteInput));
+    const noteInput=input('text',draft.note,'Optional photo note');noteInput.maxLength=500;body.append(field('Photo note',noteInput));
+    const sharing=h('details','photo-sharing'),sharingTitle=h('summary','','Also apply to other ECS in this room'),sharedBody=h('div');sharing.open=!!draft.opened;sharing.append(sharingTitle,sharedBody);body.append(sharing);
+    const shareSummary=h('p','subtle');shareSummary.id='shared-photo-summary';shareSummary.setAttribute('aria-live','polite');body.append(shareSummary);
+    let decoded=null,drawVersion=0;
     const status=h('p','subtle','Preparing captured image…'),save=button('Save photo',async()=>{
       W.assert(processedPhoto && cameraPending,'Wait for the stamped image.');
-      const stamped=processedPhoto;W.assert(drawEpoch === photoDrawEpoch && cameraPending?.id === pending.id && session.id === sessionId,'This photo editor has changed. Reopen the retained capture.');
-      const photo=W.namePhoto({...pending,blob:stamped,type:'image/jpeg',size:stamped.size,sha256:await F.sha(stamped),crc32:F.crc32(await F.bytes(stamped)),note:noteInput.value,originalSha256:pending.sha256},photos);
-      W.assert(drawEpoch === photoDrawEpoch && session.id === sessionId,'The capture context changed while saving.');
-      const item=sourceItem(pending.itemId),editor=W.editorFor(session,model,item,pending.workDate);
-      if(!editor.photos.includes(photo.id))editor.photos.push(photo.id);W.setEditor(session,editor);session.pendingCapture=null;
-      await persist({photo,deletePending:pending.id});photos=photos.filter(value=>value.id !== photo.id).concat(photo);pendingPhotos=pendingPhotos.filter(value=>value.id !== pending.id);
-      closeDialog();render();notice('Photo saved on this device. Save the ECS progress before review.');scheduleCheckpoint();
+      W.assert(isCurrent(),'This photo editor has changed. Reopen the retained capture.');
+      W.assert(!draft.extraIds.length || draft.confirmed,'Confirm the shared gate and percentage for the selected ECS.');
+      save.disabled=true;
+      try{
+        remember();await flush();
+        const plan=W.sharedPhotoPlan(session,model,pending,draft.extraIds),token=W.stable(plan.map(value=>({id:value.item.id,editor:value.editor}))),copies=[],occupiedPaths=new Set(photos.map(W.photoPath)),copyCanvas=h('canvas');
+        for(const [index,target] of plan.entries()){
+          W.assert(isCurrent(),'Photo preparation was interrupted. Reopen the retained capture.');
+          status.textContent='Preparing photo '+(index+1)+' of '+plan.length+' · '+target.item.ecsCode;
+          const stamped=index?await stampPhoto(decoded,copyCanvas,pending,target.context,draft.note):processedPhoto;
+          const {photoDraft,...capture}=pending,id=index?pending.id+'-'+model.items.indexOf(target.item).toString(36):pending.id;
+          const photo=W.namePhoto({...capture,id,itemId:target.item.id,ecsCode:target.item.ecsCode,context:target.context,blob:stamped,type:'image/jpeg',size:stamped.size,sha256:await F.sha(stamped),crc32:F.crc32(await F.bytes(stamped)),note:draft.note,originalSha256:pending.sha256,captureId:pending.id,sharedCount:plan.length},occupiedPaths);occupiedPaths.add(W.photoPath(photo));copies.push(photo);
+          if(index%5 === 0)await new Promise(resolve=>setTimeout(resolve,0));
+        }
+        await flush();
+        W.assert(isCurrent() && token === W.stable(W.sharedPhotoPlan(session,model,pending,draft.extraIds).map(value=>({id:value.item.id,editor:value.editor}))),'The selected work changed during photo preparation. Review the retained capture again.');
+        const next=W.copy(session);next.journalGeneration+=1;next.updatedAt=new Date().toISOString();next.storageVersion=committedVersion;next.pendingCapture=null;
+        plan.forEach((target,index)=>{const editor=W.copy(target.editor);if(!editor.photos.includes(copies[index].id))editor.photos.push(copies[index].id);W.setEditor(next,editor);if(index)W.saveEditor(next,model,target.item,editor);});
+        W.validateSession(next,model,new Set([...photos,...copies].map(value=>value.id)));
+        status.textContent='Saving '+copies.length+' photo'+(copies.length === 1?'':'s')+' on this device…';saving('Saving photo…');
+        // All earlier edits and the original are committed before this transaction.
+        // Do not journal staged photo references or replace the live session until
+        // every photo and extra daily record has committed together.
+        committingPhoto=true;
+        try{const saved=await S.save(next,{photos:copies,deletePending:pending.id});session=saved;committedVersion=saved.storageVersion;queue=Promise.resolve(saved);}
+        finally{committingPhoto=false;}
+        photos=photos.filter(value=>!copies.some(copy=>copy.id === value.id)).concat(copies);pendingPhotos=pendingPhotos.filter(value=>value.id !== pending.id);cameraPending=null;
+        closeDialog();render();$('error-banner').hidden=true;saving('Saved on this device');notice(copies.length === 1?'Photo saved on this device. Save the ECS progress before review.':copies.length+' individually stamped photos saved. '+(copies.length-1)+' other ECS added to Draft; save this ECS progress as usual.');scheduleCheckpoint();
+      }catch(error){if(isCurrent())status.textContent='Photo save was not confirmed. Keep this page open; the original and selection are available for retry or recovery.';throw error;}
+      finally{if(isCurrent())save.disabled=!processedPhoto || !!draft.extraIds.length && !draft.confirmed;}
     },'button primary block');save.id='save-photo';save.disabled=true;body.append(status,save);
+    status.id='photo-preparation-status';status.setAttribute('aria-live','polite');
+    const updateSummary=()=>{
+      const choice=draft.extraIds.length?W.sharedPhotoChoice(session,model,pending,draft.extraIds[0]):null;
+      shareSummary.textContent=draft.extraIds.length?'This photo + '+gateLabel(choice?.gate || pending.context.editor.fields.gate || '')+' · '+(choice?.percent ?? '—')+'% → '+(draft.extraIds.length+1)+' ECS. Other daily-log answers stay individual.':'';
+      save.disabled=!processedPhoto || !!draft.extraIds.length && !draft.confirmed;
+      sharingTitle.textContent='Also apply to other ECS in this room'+(draft.extraIds.length?' · '+draft.extraIds.length+' selected':'');
+    };
+    const renderSharing=()=>{
+      sharedBody.replaceChildren();const query=input('search','','Find an ECS in this room'),results=h('div','shared-photo-list'),count=h('p','subtle'),warning=h('div','note'),consent=input('checkbox'),label=h('label','check');query.id='shared-photo-query';
+      const choices=W.visibleItems(session,model,sourceItem(pending.itemId).roomLabel).filter(item=>item.id !== pending.itemId).map(item=>({item,...W.sharedPhotoChoice(session,model,pending,item.id)}));
+      const choose=ids=>{draft.extraIds=ids;draft.confirmed=false;remember();renderSharing();updateSummary();};
+      const selectAll=button('Select all compatible ('+choices.filter(value=>value.allowed).length+')',()=>choose(choices.filter(value=>value.allowed).map(value=>value.item.id)),'button');selectAll.id='shared-photo-select-all';selectAll.disabled=!choices.some(value=>value.allowed);
+      const clear=button('Clear selection',()=>choose([]),'link-button');clear.disabled=!draft.extraIds.length;
+      sharedBody.append(h('p','subtle','Only planned and added ECS in '+pending.room+'. The captured gate and percentage will also be applied. Add other work through Add ECS first.'),field('Find ECS',query),selectAll,clear,count,results,warning);
+      label.append(consent,h('span','','I confirm the photo and this gate/progress apply to every selected ECS.'));consent.id='confirm-shared-photo';consent.checked=!!draft.confirmed;consent.onchange=()=>{draft.confirmed=consent.checked;remember();updateSummary();};sharedBody.append(label);
+      const draw=()=>{
+        results.replaceChildren();const found=choices.filter(value=>(value.item.ecsCode+' '+value.item.commodity).toLowerCase().includes(query.value.trim().toLowerCase()));
+        count.textContent=choices.filter(value=>value.allowed).length+' compatible · '+draft.extraIds.length+' selected'+(found.length>40?' · showing 40; type to narrow':'');
+        found.slice(0,40).forEach(choice=>{
+          const row=h('label','shared-photo-choice'),check=input('checkbox'),info=h('span','grow');check.checked=draft.extraIds.includes(choice.item.id);check.disabled=!choice.allowed;check.dataset.shareEcs=choice.item.id;
+          const prior=choice.before?.fields,priorRule=R.workflow(choice.item).rules.find(value=>value.code === prior?.gate),was=priorRule?.policy === 'Fixed'?priorRule.percent:prior?.percent ?? choice.before?.previous.percent ?? choice.item.sourcePercent;
+          info.append(h('strong','',choice.item.ecsCode),h('span','subtle',choice.allowed?(was ?? '—')+'% → '+choice.percent+'% · '+choice.item.canonicalCommodity:choice.reason));row.append(check,info);results.append(row);
+          check.onchange=()=>{draft.extraIds=check.checked?[...new Set([...draft.extraIds,choice.item.id])]:draft.extraIds.filter(id=>id !== choice.item.id);draft.confirmed=false;remember();consent.checked=false;clear.disabled=!draft.extraIds.length;draw();updateWarning();updateSummary();};
+        });
+      };
+      const updateWarning=()=>{
+        const unavailable=draft.extraIds.filter(id=>!choices.some(value=>value.item.id === id && value.allowed));
+        const edited=choices.filter(value=>draft.extraIds.includes(value.item.id) && value.allowed && W.hasFields(value.before.fields) && (value.before.fields.gate !== value.gate || R.number(value.before.fields.percent)!==value.percent));
+        warning.hidden=!draft.extraIds.length;warning.textContent=unavailable.length?'Some selected ECS are no longer compatible. Clear the selection and choose again.':edited.length?'Gate/progress changes on '+edited.length+' existing entr'+(edited.length === 1?'y':'ies')+'. Other answers and earlier exports stay intact; changed entries need supervisor review again.':'The other selected ECS will be added to Draft with this gate and percentage. Complete their individual required fields before sign-off.';
+        if(unavailable.length){draft.confirmed=false;consent.checked=false;consent.disabled=true;}
+      };
+      query.oninput=draw;draw();updateWarning();updateSummary();
+    };
+    let sharingRendered=false;const openSharing=()=>{if(!sharing.open)return;if(!sharingRendered){renderSharing();sharingRendered=true;}draft.opened=true;remember();};
+    sharing.addEventListener('toggle',()=>{if(sharing.open)openSharing();else{draft.opened=false;remember();}});
+    if(sharing.open)openSharing();updateSummary();
     try{
-      const bitmap=await createImageBitmap(pending.blob),scale=Math.min(1,1800/Math.max(bitmap.width,bitmap.height));
-      canvas.width=Math.max(320,Math.round(bitmap.width*scale));const pictureHeight=Math.round(bitmap.height*scale);canvas.height=pictureHeight+125;
-      const context=canvas.getContext('2d');
-      let drawVersion=0;
+      decoded=await decodePhoto(pending.blob);if(!isCurrent()){decoded.close();return;}photoCleanup=()=>decoded.close();
       const draw=async()=>{
         const version=++drawVersion;
-        context.fillStyle='#fff';context.fillRect(0,0,canvas.width,canvas.height);context.drawImage(bitmap,0,0,canvas.width,pictureHeight);
-        context.fillStyle='#172c42';context.fillRect(0,pictureHeight,canvas.width,125);context.fillStyle='#fff';
-        context.font='bold '+Math.max(14,Math.round(canvas.width/45))+'px sans-serif';
-        const fields=pending.context.editor.fields,previous=pending.context.editor.previous;
-        const gate=fields.noProgress?previous.gate:fields.gate,percent=fields.noProgress?previous.percent:fields.percent;
-        [pending.building+' · '+pending.room+' · '+pending.ecsCode,pending.captureDate+' · '+(gate || 'Gate not recorded')+' · '+(percent ?? '—')+'%'+(fields.noProgress?' · No Progress':''),noteInput.value].forEach((line,index)=>context.fillText(line,14,pictureHeight+30+index*32,canvas.width-28));
-        const result=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',.82));if(version !== drawVersion || drawEpoch !== photoDrawEpoch || cameraPending?.id !== pending.id || session.id !== sessionId || !canvas.isConnected)return;processedPhoto=result;save.disabled=!processedPhoto;status.textContent='Captured context is preserved with the photo.';
+        const result=await stampPhoto(decoded,canvas,pending,pending.context,draft.note);if(version !== drawVersion || !isCurrent())return;processedPhoto=result;updateSummary();status.textContent='Captured context is preserved with the photo.';
       };
-      noteInput.addEventListener('input',()=>{save.disabled=true;draw().catch(showError);});await draw();
-    }catch(error){status.textContent='This image could not be decoded. Its original bytes are retained in recovery. '+error.message;}
+      noteInput.addEventListener('input',()=>{draft.note=noteInput.value;remember();processedPhoto=null;save.disabled=true;draw().catch(error=>{if(isCurrent())status.textContent=error.message;});});await draw();
+    }catch(error){if(isCurrent()){status.textContent='Its original bytes are retained in recovery. '+error.message;body.append(button('Retry preparing photo',()=>resumePhoto(pending),'button block'));}}
   }
   async function recoveryMenu(){
     await flush();const body=dialog('Recovery backups'),snapshots=(await S.snapshots()).sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
@@ -697,9 +785,9 @@
   }
   const foreground=()=>recoverForeground().catch(showError);
   setInterval(onDayChange,30000);window.addEventListener('focus',foreground);window.addEventListener('pageshow',foreground);document.addEventListener('resume',foreground);
-  document.addEventListener('visibilitychange',()=>{if(document.hidden && session){session.ui.scroll=content.scrollTop;S.journal(session);}else foreground();});
-  window.addEventListener('pagehide',()=>{if(session){session.ui.scroll=content.scrollTop;session.journalGeneration+=1;S.journal(session);}});
-  modal.addEventListener('cancel',()=>{photoDrawEpoch++;cameraPending=null;processedPhoto=null;releaseDownload();});
+  document.addEventListener('visibilitychange',()=>{if(document.hidden && session){session.ui.scroll=content.scrollTop;if(!committingPhoto)S.journal(session);}else foreground();});
+  window.addEventListener('pagehide',()=>{if(session && !committingPhoto){session.ui.scroll=content.scrollTop;session.journalGeneration+=1;S.journal(session);}});
+  modal.addEventListener('cancel',()=>{retainCaptureDraft();photoDrawEpoch++;photoCleanup?.();photoCleanup=null;cameraPending=null;processedPhoto=null;releaseDownload();});
   window.ProgressApp={get session(){return session;},get model(){return model;},get photos(){return photos;},get offlineReady(){return offlineReady;},
     flush,persist,render,navigate,checkpoint,acceptCamera,saveOpen,onDayChange,recoverForeground,storage:S,
     loadExample:async(name='Example worker')=>{stagedModel=null;if(session)await checkpoint('Before example replacement');model=W.example();session=await S.replace(W.createSession(model,{name}),model);photos=[];pendingPhotos=[];committedVersion=0;queue=Promise.resolve();storageFailed=false;render();},
