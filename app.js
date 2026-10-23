@@ -441,8 +441,11 @@
         batch.append(button('Continue unfinished record',async()=>{session.ui.screen='rooms';session.ui.room=item.roomLabel;session.ui.expanded=item.id;session.ui.editDate=editor.date;await persist();render();},'button'));
         batch.append(button('Discard entry',()=>confirmDelete({itemId:item.id,day:editor.date}),'link-button danger'));
       });
-      const unreviewed=pending.filter(record=>!W.approvalFor(session,record));
-      if(unreviewed.length){const review=button('Review & sign off',()=>reviewDay(day),'button primary block');review.disabled=editors.length>0 || unreviewed.some(record=>!W.validateRecord(session,model,record).ready);batch.append(review);}
+      const unreviewed=W.pending(session,day).filter(record=>!W.approvalFor(session,record));
+      if(unreviewed.length){
+        if(editors.some(editor=>!W.recordFor(session,day,editor.itemId)))batch.append(h('p','subtle','Unfinished entries stay in Draft and are not included in this sign-off.'));
+        const review=button('Review & sign off',()=>reviewDay(day),'button primary block');review.disabled=unreviewed.some(record=>!W.validateRecord(session,model,record).ready);batch.append(review);
+      }
       else if(pending.length)batch.append(pill('Supervisor approval saved','good'));
       else if(!editors.length && !checkins.length)batch.append(h('p','subtle','No unexported draft records for this day.'));
       const history=session.exports.filter(entry=>entry.kind === 'daily' && entry.date === day);
@@ -470,23 +473,25 @@
   }
   function renderExport(){
     resetContent();heading('Daily export','TAKE YOUR WORK BACK','CSV and recovery data, with photos in a separate companion ZIP.');
-    const days=[...new Set([today,...session.records.map(record=>record.date),...(session.checkins || []).map(record=>record.date),...session.exports.map(entry=>entry.date).filter(Boolean)])].sort().reverse(),daySelect=select(days.map(day=>({value:day,label:dayLabel(day)})),days.includes(session.ui.exportDay)?session.ui.exportDay:today),body=h('div');
+    const days=[...new Set([today,...session.records.map(record=>record.date),...(session.checkins || []).map(record=>record.date),...Object.values(session.editors).map(editor=>editor.date),...session.exports.map(entry=>entry.date).filter(Boolean)])].sort().reverse(),daySelect=select(days.map(day=>({value:day,label:dayLabel(day)})),days.includes(session.ui.exportDay)?session.ui.exportDay:today),body=h('div');
     daySelect.id='export-day';content.append(field('Work day',daySelect),body);
     const update=()=>{
-      body.replaceChildren();const day=daySelect.value,records=[...W.pending(session,day),...W.pendingCheckins(session,day)],exported=[...session.records,...(session.checkins || [])].filter(record=>record.date === day && W.exported(session,record));
+      body.replaceChildren();const day=daySelect.value,state=W.dailyExportState(session,model,day),{records,unfinished,errors,approved}=state,exported=[...session.records,...(session.checkins || [])].filter(record=>record.date === day && W.exported(session,record));
       body.append(h('p','',records.length+' records awaiting export · '+exported.length+' already exported'));
-      const errors=records.flatMap(record=>W.isCheckin(record)?[]:W.validateRecord(session,model,record).errors);
       if(errors.length)body.append(validationBox([...new Set(errors)]));
-      const approved=records.length>0 && records.every(record=>W.isCheckin(record) || W.approvalFor(session,record));
-      if(records.length)body.append(pill(approved?(records.every(W.isCheckin)?'Supervisor names recorded':'Supervisor approval saved'):'Supervisor review needed',approved?'good':''));
+      if(records.length)body.append(pill(errors.length?'Resolve draft changes before export':approved?(records.every(W.isCheckin)?'Supervisor names recorded':'Supervisor approval saved'):'Supervisor review needed',approved && !errors.length?'good':''));
       else body.append(h('p','green-text',exported.length?'All saved records for this day have a prepared download below.':'No saved records for this day.'));
+      if(unfinished.length){
+        const warning=h('div','note');warning.append(h('p','',unfinished.length+' unfinished ECS entr'+(unfinished.length === 1?'y is':'ies are')+' excluded from the CSV. Edits and photos stay in the recovery backup.'),button('Continue unfinished work',()=>navigate('draft'),'link-button'));body.append(warning);
+      }
       const list=h('div','export-list');
       [['export','Daily progress CSV','Only this day’s new or changed records; includes all entered daily-log fields.'],['down','Recovery data + companion photos','Week, drafts, history and approvals. Keep both ZIPs to restore all photos, including earlier work and interrupted captures.']].forEach(([symbol,title,desc])=>{const row=h('div'),text=h('div');text.append(h('strong','',title),h('p','subtle',desc));row.append(icon(symbol),text);list.append(row);});if(records.length)body.append(list);
       const exp=button('Download daily package',async()=>{
-        await flush();W.assert(!Object.values(session.editors).some(editor=>editor.date === day && W.editorDirty(session,editor)),'Finish the saved editor changes before exporting this day.');
-        saving('Preparing export…');const result=await F.dailyZip(session,model,records,photos,pendingPhotos);
+        await flush();const current=W.dailyExportState(session,model,day);
+        if(!current.ready){update();W.assert(false,current.errors.join(' ') || (current.records.length?'Review and sign the saved records before exporting.':'There are no unexported records for this day.'));}
+        saving('Preparing export…');const result=await F.dailyZip(session,model,current.records,photos,pendingPhotos);
         await offerDailyDownload(result);
-      },'button primary block','down');exp.id='daily-export';exp.disabled=!approved || !!errors.length;if(records.length)body.append(exp);
+      },'button primary block','down');exp.id='daily-export';exp.disabled=!state.ready;if(records.length)body.append(exp);
       if(records.length && !approved && !errors.length)body.append(button('Review & sign first',()=>reviewDay(day),'link-button'));
       if(records.length)body.append(h('p','subtle','The data ZIP has no image bytes. A companion photo ZIP is prepared whenever recovery needs photos.'));
       const history=session.exports.filter(entry=>entry.kind === 'daily' && entry.date === day).slice().reverse();

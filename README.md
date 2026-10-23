@@ -19,6 +19,8 @@ Weekly packages can authorise complete work groups within the selected buildings
 - Delete a daily entry from its editor or draft. Undo is available in the collapsed Deleted entries section for the loaded week, including its saved photos. Weekly-plan cards remain available. Restored work requires fresh review.
 - Export the daily CSV and recovery data in one ZIP. Photos are prepared in a separate companion ZIP; the ready dialog offers matching Save Data and Save Photos buttons, each downloading its own file. Previous downloads remain available for the active week.
 
+An unfinished ECS that has no saved record in the selected export stays outside the CSV and supervisor sign-off. Its edits and photos remain in recovery, and the Export screen shows a reminder to continue it. Unfinished changes to a saved record being exported still require completion and review before downloading that day's work.
+
 New daily batches use `DL-YYYYMMDD-HHmmss-xxxxxxxx`, with UK local date and time and an eight-character random suffix. Repeat downloads retain the original batch ID. Older saved batches keep their existing IDs.
 
 The app records exports; it does not confirm that exported files were received elsewhere.

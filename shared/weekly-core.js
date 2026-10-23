@@ -3,7 +3,7 @@
   'use strict';
   const R = typeof module === 'object' && module.exports ? require('./production-core.js') : root.ProductionCore;
   const copy = R.copy, text = R.text;
-  const VERSION = '1.6.0';
+  const VERSION = '1.6.1';
   const {WORK_GROUPS,workGroup,rowGroup} = R;
   const uid = (prefix = '') => prefix + (root.crypto?.randomUUID ? root.crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
   function stable(value) {
@@ -356,6 +356,18 @@
     return session.exports.some(entry=>entry.kind === 'daily' && entry.status === 'download-started' && entry.records.some(value=>value.id === record.id && value.revision === record.revision && value.fingerprint === fingerprint(record)));
   }
   function pending(session,day) { return session.records.filter(record=>record.date === day && !exported(session,record)); }
+  function dailyExportState(session,model,day) {
+    const records=[...pending(session,day),...pendingCheckins(session,day)],ids=new Set(records.filter(record=>!isCheckin(record)).map(record=>record.itemId));
+    // Edits to a selected saved record are validated below. Other unfinished
+    // entries stay in recovery and are never promoted into the signed CSV.
+    const unfinished=Object.values(session.editors).filter(editor=>editor.date === day && editorDirty(session,editor) && !ids.has(editor.itemId));
+    const errors=[...new Set(records.flatMap(record=>{
+      if(!isCheckin(record))return validateRecord(session,model,record).errors;
+      try{validateCheckin(record);return [];}catch(error){return [error.message];}
+    }))];
+    const approved=records.length>0 && records.every(record=>isCheckin(record) || approvalFor(session,record));
+    return {records,unfinished,errors,approved,ready:approved && !errors.length};
+  }
   function sign(session,model,records,name,now = new Date().toISOString()) {
     assert(text(name).length >= 2,'Enter the supervisor’s full name.');
     assert(records.length,'There are no records to review.');
@@ -525,6 +537,6 @@
     return prepareRows(weekly,refs);
   }
   const api = {VERSION,R,copy,text,uid,newBatchId,stable,assert,date,config,gate,reportedPercent,prepareRows,pack,unpack,createSession,editorKey,recordFor,hasFields,essence,fingerprint,
-    WORK_GROUPS,groupLabel,workGroup,rowGroup,recorder,groupScopes,scopeDisciplines,workConflicts,saveWorkCheckin,isCheckin,noProgressBatchId,validateCheckin,saveBuildingCheckin,pendingCheckins,roomChanged,validateProgress,previousFor,previousForEdit,editorFor,editorDirty,setEditor,saveEditor,sharedPhotoChoice,sharedPhotoPlan,validateRecord,approvalFor,exported,pending,sign,visibleItems,search,addCandidate,candidateRemoval,removeCandidate,deleteEntry,restoreCheck,restoreEntry,hiddenPhotoIds,position,validateSession,photoPath,namePhoto,example,today:R.londonDate};
+    WORK_GROUPS,groupLabel,workGroup,rowGroup,recorder,groupScopes,scopeDisciplines,workConflicts,saveWorkCheckin,isCheckin,noProgressBatchId,validateCheckin,saveBuildingCheckin,pendingCheckins,roomChanged,validateProgress,previousFor,previousForEdit,editorFor,editorDirty,setEditor,saveEditor,sharedPhotoChoice,sharedPhotoPlan,validateRecord,approvalFor,exported,pending,dailyExportState,sign,visibleItems,search,addCandidate,candidateRemoval,removeCandidate,deleteEntry,restoreCheck,restoreEntry,hiddenPhotoIds,position,validateSession,photoPath,namePhoto,example,today:R.londonDate};
   if (typeof module === 'object' && module.exports) module.exports = api; else root.WeeklyCore = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
