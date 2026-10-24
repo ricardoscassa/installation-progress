@@ -3,7 +3,7 @@
   'use strict';
   const R = typeof module === 'object' && module.exports ? require('./production-core.js') : root.ProductionCore;
   const copy = R.copy, text = R.text;
-  const VERSION = '1.6.0';
+  const VERSION = '1.6.2';
   const {WORK_GROUPS,workGroup,rowGroup} = R;
   const uid = (prefix = '') => prefix + (root.crypto?.randomUUID ? root.crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
   function stable(value) {
@@ -270,6 +270,31 @@
     editor.updatedAt = now; session.editors[editorKey(editor.date,editor.itemId)] = copy(editor);
     session.updatedAt = now;
   }
+  function photoRemoval(session,model,photo){
+    const item=model.items.find(item=>item.id === photo.itemId),day=photo.workDate;
+    if(!item || item.building !== photo.building || item.room !== photo.room || item.ecsCode !== photo.ecsCode)return {allowed:false,reason:'The photo does not match this ECS.'};
+    const record=recordFor(session,day,item.id),editor=session.editors[editorKey(day,item.id)];
+    if(!record?.photos.includes(photo.id) && !editor?.photos.includes(photo.id))return {allowed:false,reason:'This photo is kept in history or recovery.'};
+    if(session.pendingCapture?.itemId === item.id && (session.pendingCapture.workDate || session.pendingCapture.editor?.date) === day)return {allowed:false,reason:'Finish the interrupted photo before removing evidence from this entry.'};
+    return {allowed:true,item,record,editor};
+  }
+  function removePhoto(session,model,photo,now=new Date().toISOString()){
+    const check=photoRemoval(session,model,photo);assert(check.allowed,check.reason);
+    const {item,record}=check,key=editorKey(photo.workDate,item.id),editor=check.editor?copy(check.editor):null;
+    if(record?.photos.includes(photo.id)){
+      // Revise saved evidence without committing any other unfinished answers.
+      const changed={...editorFor(session,model,item,photo.workDate),fields:copy(record.fields),previous:copy(record.previous),photos:record.photos.filter(id=>id !== photo.id)};
+      const saved=saveEditor(session,model,item,changed,now);
+      if(editor){editor.baseRevision=saved.revision;if(stable(editor.previous) === stable(record.previous))editor.previous=copy(saved.previous);}
+    }
+    if(editor){
+      editor.photos=editor.photos.filter(id=>id !== photo.id);
+      if(editorDirty(session,editor) && (record || hasFields(editor.fields) || editor.photos.length))setEditor(session,editor,now);else delete session.editors[key];
+    }
+    // Bytes remain available to earlier signed/exported snapshots and recovery.
+    session.removedPhotoIds=[...new Set([...(session.removedPhotoIds || []),photo.id])];
+    session.updatedAt=now;
+  }
   function capturedPhotoItem(model,pending){
     const item=model.items.find(value=>value.id === pending.itemId),context=pending.context;
     return item && pending.building === item.building && pending.room === item.room && pending.ecsCode === item.ecsCode && context?.itemId === item.id && context.building === item.building && context.room === item.room && context.ecsCode === item.ecsCode && context.workDate === pending.workDate && context.editor?.itemId === item.id && context.editor.date === pending.workDate?item:null;
@@ -356,6 +381,18 @@
     return session.exports.some(entry=>entry.kind === 'daily' && entry.status === 'download-started' && entry.records.some(value=>value.id === record.id && value.revision === record.revision && value.fingerprint === fingerprint(record)));
   }
   function pending(session,day) { return session.records.filter(record=>record.date === day && !exported(session,record)); }
+  function dailyExportState(session,model,day) {
+    const records=[...pending(session,day),...pendingCheckins(session,day)],ids=new Set(records.filter(record=>!isCheckin(record)).map(record=>record.itemId));
+    // Edits to a selected saved record are validated below. Other unfinished
+    // entries stay in recovery and are never promoted into the signed CSV.
+    const unfinished=Object.values(session.editors).filter(editor=>editor.date === day && editorDirty(session,editor) && !ids.has(editor.itemId));
+    const errors=[...new Set(records.flatMap(record=>{
+      if(!isCheckin(record))return validateRecord(session,model,record).errors;
+      try{validateCheckin(record);return [];}catch(error){return [error.message];}
+    }))];
+    const approved=records.length>0 && records.every(record=>isCheckin(record) || approvalFor(session,record));
+    return {records,unfinished,errors,approved,ready:approved && !errors.length};
+  }
   function sign(session,model,records,name,now = new Date().toISOString()) {
     assert(text(name).length >= 2,'Enter the supervisor’s full name.');
     assert(records.length,'There are no records to review.');
@@ -447,6 +484,7 @@
   function hiddenPhotoIds(session){
     const deleted=new Set((session.deletedEntries || []).filter(entry=>!entry.restoredAt).flatMap(entry=>[...(entry.record?.photos || []),...(entry.editor?.photos || [])]));
     for(const record of [...session.records,...Object.values(session.editors),...session.exports.flatMap(entry=>(entry.records || []).map(row=>row.payload?.record).filter(Boolean))])for(const id of record.photos || [])deleted.delete(id);
+    for(const id of session.removedPhotoIds || [])deleted.add(id);
     return deleted;
   }
   function position(session,model,item,day) {
@@ -459,6 +497,7 @@
   function validateSession(session,model,photoIds = null) {
     assert(session?.schema === 'weekly-progress-session/1' && session.packageId === model.sessionId,'Recovery session does not match the weekly package.');
     assert(Array.isArray(session.records) && Array.isArray(session.approvals) && Array.isArray(session.exports) && session.editors && session.ui,'Invalid saved session.');
+    if(session.removedPhotoIds !== undefined)assert(Array.isArray(session.removedPhotoIds) && session.removedPhotoIds.length<=100000 && new Set(session.removedPhotoIds).size === session.removedPhotoIds.length && session.removedPhotoIds.every(id=>typeof id === 'string' && /^[a-zA-Z0-9_-]+$/.test(id) && (!photoIds || photoIds.has(id))),'Invalid removed photo history.');
     const identities = new Set(), ids = new Set(), allItems = new Set(model.items.map(item=>item.id));
     session.checkins ||= [];
     assert(Array.isArray(session.checkins) && session.checkins.length<=10000,'Invalid building check-in history.');
@@ -525,6 +564,6 @@
     return prepareRows(weekly,refs);
   }
   const api = {VERSION,R,copy,text,uid,newBatchId,stable,assert,date,config,gate,reportedPercent,prepareRows,pack,unpack,createSession,editorKey,recordFor,hasFields,essence,fingerprint,
-    WORK_GROUPS,groupLabel,workGroup,rowGroup,recorder,groupScopes,scopeDisciplines,workConflicts,saveWorkCheckin,isCheckin,noProgressBatchId,validateCheckin,saveBuildingCheckin,pendingCheckins,roomChanged,validateProgress,previousFor,previousForEdit,editorFor,editorDirty,setEditor,saveEditor,sharedPhotoChoice,sharedPhotoPlan,validateRecord,approvalFor,exported,pending,sign,visibleItems,search,addCandidate,candidateRemoval,removeCandidate,deleteEntry,restoreCheck,restoreEntry,hiddenPhotoIds,position,validateSession,photoPath,namePhoto,example,today:R.londonDate};
+    WORK_GROUPS,groupLabel,workGroup,rowGroup,recorder,groupScopes,scopeDisciplines,workConflicts,saveWorkCheckin,isCheckin,noProgressBatchId,validateCheckin,saveBuildingCheckin,pendingCheckins,roomChanged,validateProgress,previousFor,previousForEdit,editorFor,editorDirty,setEditor,photoRemoval,removePhoto,saveEditor,sharedPhotoChoice,sharedPhotoPlan,validateRecord,approvalFor,exported,pending,dailyExportState,sign,visibleItems,search,addCandidate,candidateRemoval,removeCandidate,deleteEntry,restoreCheck,restoreEntry,hiddenPhotoIds,position,validateSession,photoPath,namePhoto,example,today:R.londonDate};
   if (typeof module === 'object' && module.exports) module.exports = api; else root.WeeklyCore = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

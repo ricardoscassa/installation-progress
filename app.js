@@ -349,7 +349,7 @@
       box.append(h('summary','',entry.kind === 'checkin'?record.building+' · '+W.groupLabel(record.groupId)+' · No progress':item.ecsCode+' · room '+item.room),h('p','subtle','Deleted '+time(entry.deletedAt)));
       if(record && item)box.append(h('p','',summary(record,item)));
       if(entry.kind === 'checkin')box.append(h('p','',record.supervisorName));
-      const photoIds=[...new Set([...(record?.photos || []),...(entry.editor?.photos || [])])];if(photoIds.length)box.append(photoGrid(photoIds));
+      const photoIds=[...new Set([...(record?.photos || []),...(entry.editor?.photos || [])])];if(photoIds.length)box.append(photoGrid(photoIds,{editable:false}));
       const check=W.restoreCheck(session,entry),undo=button('Undo deletion',async()=>{W.restoreEntry(session,model,entry.id);await persist();render();notice('Entry restored. Review it again before exporting.');scheduleCheckpoint();},'button block');undo.dataset.restoreEntry=entry.id;undo.disabled=!check.allowed;box.append(undo);
       if(!check.allowed)box.append(h('p','subtle',check.reason));group.append(box);
     });parent.append(group);
@@ -390,9 +390,9 @@
     };
     query.addEventListener('input',update);update();
   }
-  function photoGrid(ids){
+  function photoGrid(ids,{editable=true}={}){
     const grid=h('div','photo-grid');
-    ids.forEach(id=>{const photo=photos.find(value=>value.id === id);if(!photo)return;const tile=button('',()=>viewPhoto(photo),'photo-tile');tile.append(image(photo),h('span','',photo.ecsCode+' · '+photo.captureDate));grid.append(tile);});return grid;
+    ids.forEach(id=>{const photo=photos.find(value=>value.id === id);if(!photo)return;const tile=button('',()=>viewPhoto(photo,{editable}),'photo-tile');tile.append(image(photo),h('span','',photo.ecsCode+' · '+photo.captureDate));grid.append(tile);});return grid;
   }
   function recordDetails(record,{history=false}={}){
     if(W.isCheckin(record)){
@@ -413,7 +413,7 @@
     Object.entries(record.fields).filter(([name,value])=>!['gate','percent'].includes(name) && R.meaningful(value)).forEach(([name,value])=>values.push([definitions.find(def=>def.id === name)?.label || ({comments:'Comments',noProgress:'No Progress'}[name]) || name,String(value)]));
     values.push(['Recorded by',record.operator.name],['Saved',time(record.savedAt)],['Photos',record.photos.length]);
     values.forEach(([label,value])=>kv.append(h('dt','',label),h('dd','',value ?? '')));details.append(kv);
-    if(record.photos.length)details.append(photoGrid(record.photos));
+    if(record.photos.length)details.append(photoGrid(record.photos,{editable:!history}));
     const approvals=session.approvals.filter(approval=>approval.records.some(value=>value.id === record.id));
     approvals.forEach(approval=>{
       const label=(approval.invalidatedAt?'Previous review by ':'Reviewed by ')+approval.name+' · '+time(approval.signedAt)+' · revision '+approval.records.find(value=>value.id === record.id).revision+(approval.invalidatedAt?' · review required again':'');
@@ -441,8 +441,11 @@
         batch.append(button('Continue unfinished record',async()=>{session.ui.screen='rooms';session.ui.room=item.roomLabel;session.ui.expanded=item.id;session.ui.editDate=editor.date;await persist();render();},'button'));
         batch.append(button('Discard entry',()=>confirmDelete({itemId:item.id,day:editor.date}),'link-button danger'));
       });
-      const unreviewed=pending.filter(record=>!W.approvalFor(session,record));
-      if(unreviewed.length){const review=button('Review & sign off',()=>reviewDay(day),'button primary block');review.disabled=editors.length>0 || unreviewed.some(record=>!W.validateRecord(session,model,record).ready);batch.append(review);}
+      const unreviewed=W.pending(session,day).filter(record=>!W.approvalFor(session,record));
+      if(unreviewed.length){
+        if(editors.some(editor=>!W.recordFor(session,day,editor.itemId)))batch.append(h('p','subtle','Unfinished entries stay in Draft and are not included in this sign-off.'));
+        const review=button('Review & sign off',()=>reviewDay(day),'button primary block');review.disabled=unreviewed.some(record=>!W.validateRecord(session,model,record).ready);batch.append(review);
+      }
       else if(pending.length)batch.append(pill('Supervisor approval saved','good'));
       else if(!editors.length && !checkins.length)batch.append(h('p','subtle','No unexported draft records for this day.'));
       const history=session.exports.filter(entry=>entry.kind === 'daily' && entry.date === day);
@@ -470,23 +473,25 @@
   }
   function renderExport(){
     resetContent();heading('Daily export','TAKE YOUR WORK BACK','CSV and recovery data, with photos in a separate companion ZIP.');
-    const days=[...new Set([today,...session.records.map(record=>record.date),...(session.checkins || []).map(record=>record.date),...session.exports.map(entry=>entry.date).filter(Boolean)])].sort().reverse(),daySelect=select(days.map(day=>({value:day,label:dayLabel(day)})),days.includes(session.ui.exportDay)?session.ui.exportDay:today),body=h('div');
+    const days=[...new Set([today,...session.records.map(record=>record.date),...(session.checkins || []).map(record=>record.date),...Object.values(session.editors).map(editor=>editor.date),...session.exports.map(entry=>entry.date).filter(Boolean)])].sort().reverse(),daySelect=select(days.map(day=>({value:day,label:dayLabel(day)})),days.includes(session.ui.exportDay)?session.ui.exportDay:today),body=h('div');
     daySelect.id='export-day';content.append(field('Work day',daySelect),body);
     const update=()=>{
-      body.replaceChildren();const day=daySelect.value,records=[...W.pending(session,day),...W.pendingCheckins(session,day)],exported=[...session.records,...(session.checkins || [])].filter(record=>record.date === day && W.exported(session,record));
+      body.replaceChildren();const day=daySelect.value,state=W.dailyExportState(session,model,day),{records,unfinished,errors,approved}=state,exported=[...session.records,...(session.checkins || [])].filter(record=>record.date === day && W.exported(session,record));
       body.append(h('p','',records.length+' records awaiting export · '+exported.length+' already exported'));
-      const errors=records.flatMap(record=>W.isCheckin(record)?[]:W.validateRecord(session,model,record).errors);
       if(errors.length)body.append(validationBox([...new Set(errors)]));
-      const approved=records.length>0 && records.every(record=>W.isCheckin(record) || W.approvalFor(session,record));
-      if(records.length)body.append(pill(approved?(records.every(W.isCheckin)?'Supervisor names recorded':'Supervisor approval saved'):'Supervisor review needed',approved?'good':''));
+      if(records.length)body.append(pill(errors.length?'Resolve draft changes before export':approved?(records.every(W.isCheckin)?'Supervisor names recorded':'Supervisor approval saved'):'Supervisor review needed',approved && !errors.length?'good':''));
       else body.append(h('p','green-text',exported.length?'All saved records for this day have a prepared download below.':'No saved records for this day.'));
+      if(unfinished.length){
+        const warning=h('div','note');warning.append(h('p','',unfinished.length+' unfinished ECS entr'+(unfinished.length === 1?'y is':'ies are')+' excluded from the CSV. Edits and photos stay in the recovery backup.'),button('Continue unfinished work',()=>navigate('draft'),'link-button'));body.append(warning);
+      }
       const list=h('div','export-list');
       [['export','Daily progress CSV','Only this day’s new or changed records; includes all entered daily-log fields.'],['down','Recovery data + companion photos','Week, drafts, history and approvals. Keep both ZIPs to restore all photos, including earlier work and interrupted captures.']].forEach(([symbol,title,desc])=>{const row=h('div'),text=h('div');text.append(h('strong','',title),h('p','subtle',desc));row.append(icon(symbol),text);list.append(row);});if(records.length)body.append(list);
       const exp=button('Download daily package',async()=>{
-        await flush();W.assert(!Object.values(session.editors).some(editor=>editor.date === day && W.editorDirty(session,editor)),'Finish the saved editor changes before exporting this day.');
-        saving('Preparing export…');const result=await F.dailyZip(session,model,records,photos,pendingPhotos);
+        await flush();const current=W.dailyExportState(session,model,day);
+        if(!current.ready){update();W.assert(false,current.errors.join(' ') || (current.records.length?'Review and sign the saved records before exporting.':'There are no unexported records for this day.'));}
+        saving('Preparing export…');const result=await F.dailyZip(session,model,current.records,photos,pendingPhotos);
         await offerDailyDownload(result);
-      },'button primary block','down');exp.id='daily-export';exp.disabled=!approved || !!errors.length;if(records.length)body.append(exp);
+      },'button primary block','down');exp.id='daily-export';exp.disabled=!state.ready;if(records.length)body.append(exp);
       if(records.length && !approved && !errors.length)body.append(button('Review & sign first',()=>reviewDay(day),'link-button'));
       if(records.length)body.append(h('p','subtle','The data ZIP has no image bytes. A companion photo ZIP is prepared whenever recovery needs photos.'));
       const history=session.exports.filter(entry=>entry.kind === 'daily' && entry.date === day).slice().reverse();
@@ -530,7 +535,23 @@
     };
     picker.onchange=update;update();
   }
-  function viewPhoto(photo){const body=dialog(photo.ecsCode+' · '+photo.room),fields=photo.context.editor?.fields || photo.context.fields || {},previous=photo.context.editor?.previous || {},gate=fields.noProgress?previous.gate:fields.gate,percent=fields.noProgress?previous.percent:fields.percent;body.append(image(photo,'preview-photo'),h('p','subtle',photo.building+' · '+time(photo.capturedAt)+' · work date '+photo.workDate),h('p','subtle','Capture: '+(gate || 'Gate not recorded')+' · '+(percent ?? '—')+'%'+(fields.noProgress?' · No Progress':'')));body.append(button('Download photo',()=>download(photo.blob,W.photoPath(photo).split('/').pop()),'button block','down'));}
+  function viewPhoto(photo,{editable=true}={}){
+    const body=dialog(photo.ecsCode+' · '+photo.room),fields=photo.context.editor?.fields || photo.context.fields || {},previous=photo.context.editor?.previous || {},gate=fields.noProgress?previous.gate:fields.gate,percent=fields.noProgress?previous.percent:fields.percent;
+    body.append(image(photo,'preview-photo'),h('p','subtle',photo.building+' · '+time(photo.capturedAt)+' · work date '+photo.workDate),h('p','subtle','Capture: '+(gate || 'Gate not recorded')+' · '+(percent ?? '—')+'%'+(fields.noProgress?' · No Progress':'')),button('Download photo',()=>download(photo.blob,W.photoPath(photo).split('/').pop()),'button block','down'));
+    if(editable && W.photoRemoval(session,model,photo).allowed)body.append(button('Remove photo',()=>confirmRemovePhoto(photo),'link-button danger'));
+  }
+  async function confirmRemovePhoto(photo){
+    await flush();const check=W.photoRemoval(session,model,photo);W.assert(check.allowed,check.reason);
+    const interrupted=()=>pendingPhotos.some(pending=>captureReferences(pending,photo.itemId) && pending.workDate === photo.workDate);
+    W.assert(!interrupted(),'Finish the interrupted photo before removing evidence from this entry.');
+    const body=dialog('Remove photo?');body.append(h('p','',photo.ecsCode+' · '+dayLabel(photo.workDate)),h('p','','Remove this photo from this ECS entry. Progress and other ECS photos stay saved.'));
+    if(check.record && W.approvalFor(session,check.record))body.append(h('p','note','Changing reviewed evidence requires supervisor sign-off again.'));
+    if(check.record && wasExported(check.record))body.append(h('p','note','Earlier downloads keep their copy. This does not delete a photo already uploaded.'));
+    body.append(button('Remove from entry',async()=>{
+      await checkpoint('Before removing photo evidence');W.assert(!interrupted(),'Finish the interrupted photo before removing evidence from this entry.');
+      W.removePhoto(session,model,photo);await persist();closeDialog();render();notice('Photo removed from this entry.');scheduleCheckpoint();
+    },'button danger block'),button('Keep photo',()=>viewPhoto(photo),'button block'));
+  }
   function startCamera(item,editor){
     W.setEditor(session,editor);session.pendingCapture={itemId:item.id,workDate:editor.date,startedAt:new Date().toISOString(),editor:W.copy(editor),building:item.building,room:item.room,ecsCode:item.ecsCode};
     // persist() writes the recovery journal synchronously. The native input then opens
