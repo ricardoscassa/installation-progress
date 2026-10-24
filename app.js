@@ -349,7 +349,7 @@
       box.append(h('summary','',entry.kind === 'checkin'?record.building+' · '+W.groupLabel(record.groupId)+' · No progress':item.ecsCode+' · room '+item.room),h('p','subtle','Deleted '+time(entry.deletedAt)));
       if(record && item)box.append(h('p','',summary(record,item)));
       if(entry.kind === 'checkin')box.append(h('p','',record.supervisorName));
-      const photoIds=[...new Set([...(record?.photos || []),...(entry.editor?.photos || [])])];if(photoIds.length)box.append(photoGrid(photoIds));
+      const photoIds=[...new Set([...(record?.photos || []),...(entry.editor?.photos || [])])];if(photoIds.length)box.append(photoGrid(photoIds,{editable:false}));
       const check=W.restoreCheck(session,entry),undo=button('Undo deletion',async()=>{W.restoreEntry(session,model,entry.id);await persist();render();notice('Entry restored. Review it again before exporting.');scheduleCheckpoint();},'button block');undo.dataset.restoreEntry=entry.id;undo.disabled=!check.allowed;box.append(undo);
       if(!check.allowed)box.append(h('p','subtle',check.reason));group.append(box);
     });parent.append(group);
@@ -390,9 +390,9 @@
     };
     query.addEventListener('input',update);update();
   }
-  function photoGrid(ids){
+  function photoGrid(ids,{editable=true}={}){
     const grid=h('div','photo-grid');
-    ids.forEach(id=>{const photo=photos.find(value=>value.id === id);if(!photo)return;const tile=button('',()=>viewPhoto(photo),'photo-tile');tile.append(image(photo),h('span','',photo.ecsCode+' · '+photo.captureDate));grid.append(tile);});return grid;
+    ids.forEach(id=>{const photo=photos.find(value=>value.id === id);if(!photo)return;const tile=button('',()=>viewPhoto(photo,{editable}),'photo-tile');tile.append(image(photo),h('span','',photo.ecsCode+' · '+photo.captureDate));grid.append(tile);});return grid;
   }
   function recordDetails(record,{history=false}={}){
     if(W.isCheckin(record)){
@@ -413,7 +413,7 @@
     Object.entries(record.fields).filter(([name,value])=>!['gate','percent'].includes(name) && R.meaningful(value)).forEach(([name,value])=>values.push([definitions.find(def=>def.id === name)?.label || ({comments:'Comments',noProgress:'No Progress'}[name]) || name,String(value)]));
     values.push(['Recorded by',record.operator.name],['Saved',time(record.savedAt)],['Photos',record.photos.length]);
     values.forEach(([label,value])=>kv.append(h('dt','',label),h('dd','',value ?? '')));details.append(kv);
-    if(record.photos.length)details.append(photoGrid(record.photos));
+    if(record.photos.length)details.append(photoGrid(record.photos,{editable:!history}));
     const approvals=session.approvals.filter(approval=>approval.records.some(value=>value.id === record.id));
     approvals.forEach(approval=>{
       const label=(approval.invalidatedAt?'Previous review by ':'Reviewed by ')+approval.name+' · '+time(approval.signedAt)+' · revision '+approval.records.find(value=>value.id === record.id).revision+(approval.invalidatedAt?' · review required again':'');
@@ -535,7 +535,23 @@
     };
     picker.onchange=update;update();
   }
-  function viewPhoto(photo){const body=dialog(photo.ecsCode+' · '+photo.room),fields=photo.context.editor?.fields || photo.context.fields || {},previous=photo.context.editor?.previous || {},gate=fields.noProgress?previous.gate:fields.gate,percent=fields.noProgress?previous.percent:fields.percent;body.append(image(photo,'preview-photo'),h('p','subtle',photo.building+' · '+time(photo.capturedAt)+' · work date '+photo.workDate),h('p','subtle','Capture: '+(gate || 'Gate not recorded')+' · '+(percent ?? '—')+'%'+(fields.noProgress?' · No Progress':'')));body.append(button('Download photo',()=>download(photo.blob,W.photoPath(photo).split('/').pop()),'button block','down'));}
+  function viewPhoto(photo,{editable=true}={}){
+    const body=dialog(photo.ecsCode+' · '+photo.room),fields=photo.context.editor?.fields || photo.context.fields || {},previous=photo.context.editor?.previous || {},gate=fields.noProgress?previous.gate:fields.gate,percent=fields.noProgress?previous.percent:fields.percent;
+    body.append(image(photo,'preview-photo'),h('p','subtle',photo.building+' · '+time(photo.capturedAt)+' · work date '+photo.workDate),h('p','subtle','Capture: '+(gate || 'Gate not recorded')+' · '+(percent ?? '—')+'%'+(fields.noProgress?' · No Progress':'')),button('Download photo',()=>download(photo.blob,W.photoPath(photo).split('/').pop()),'button block','down'));
+    if(editable && W.photoRemoval(session,model,photo).allowed)body.append(button('Remove photo',()=>confirmRemovePhoto(photo),'link-button danger'));
+  }
+  async function confirmRemovePhoto(photo){
+    await flush();const check=W.photoRemoval(session,model,photo);W.assert(check.allowed,check.reason);
+    const interrupted=()=>pendingPhotos.some(pending=>captureReferences(pending,photo.itemId) && pending.workDate === photo.workDate);
+    W.assert(!interrupted(),'Finish the interrupted photo before removing evidence from this entry.');
+    const body=dialog('Remove photo?');body.append(h('p','',photo.ecsCode+' · '+dayLabel(photo.workDate)),h('p','','Remove this photo from this ECS entry. Progress and other ECS photos stay saved.'));
+    if(check.record && W.approvalFor(session,check.record))body.append(h('p','note','Changing reviewed evidence requires supervisor sign-off again.'));
+    if(check.record && wasExported(check.record))body.append(h('p','note','Earlier downloads keep their copy. This does not delete a photo already uploaded.'));
+    body.append(button('Remove from entry',async()=>{
+      await checkpoint('Before removing photo evidence');W.assert(!interrupted(),'Finish the interrupted photo before removing evidence from this entry.');
+      W.removePhoto(session,model,photo);await persist();closeDialog();render();notice('Photo removed from this entry.');scheduleCheckpoint();
+    },'button danger block'),button('Keep photo',()=>viewPhoto(photo),'button block'));
+  }
   function startCamera(item,editor){
     W.setEditor(session,editor);session.pendingCapture={itemId:item.id,workDate:editor.date,startedAt:new Date().toISOString(),editor:W.copy(editor),building:item.building,room:item.room,ecsCode:item.ecsCode};
     // persist() writes the recovery journal synchronously. The native input then opens
